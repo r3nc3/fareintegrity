@@ -32,7 +32,7 @@ Demo accounts:
 |---|---|---|
 | platform@fareguard.demo | Platform operator (all SACCOs) | admin1234 |
 | admin@kiambu.demo | SACCO admin | sacco1234 |
-| con@kiambu.demo | Conductor | con12345 |
+| con@kiambu.demo | Conductor (trip view, shift close) | con12345 |
 | auditor@kiambu.demo | Auditor (read-only) | audit1234 |
 
 The demo database is seeded with planted integrity failures: a duplicate charge,
@@ -47,13 +47,19 @@ Self-test suite (spawns its own server on port 8032 and exits):
 
 ## Core workflow
 
-1. **Record** a fare at point of entry (`POST /api/transactions`) — conductor,
-   vehicle, route, stage, passengers, tender. The amount must equal
-   `stage fare x passengers`; passenger count cannot exceed vehicle capacity;
-   future timestamps are rejected.
-2. **Ingest** records synced from fare devices or imported from CSV
-   (`POST /api/ingest/batch`, `POST /api/ingest/csv`). Sequence gaps, duplicate
-   references, duplicate receipts and fare deviations are detected automatically.
+0. **Manage** users, fleet and routes from the **Manage** tab (admins only).
+   Platform operators onboard new SACCOs and create SACCO admins; SACCO admins
+   add conductors, auditors, vehicles, routes and stage fares. Every change is
+   audited.
+1. **Ingest** records synced from fare devices or imported from CSV
+   (`POST /api/ingest/batch`, `POST /api/ingest/csv`). This is the primary record
+   source. Sequence gaps, duplicate references, duplicate receipts and fare
+   deviations are detected automatically.
+2. **Record an exceptional fare manually** (`POST /api/transactions`, admins
+   only) when a device record is missing or needs correction — vehicle, route,
+   stage, passengers, tender. The amount must equal `stage fare x passengers`;
+   passenger count cannot exceed vehicle capacity; future timestamps are
+   rejected. Conductors do not record fares.
 3. **Reconcile** a day (`POST /api/reconcile/run`): cash declared vs recorded per
    closed shift, device sequence gaps, duplicate fingerprints, amount mismatches
    and orphan records. Produces an integrity score.
@@ -64,7 +70,7 @@ Self-test suite (spawns its own server on port 8032 and exits):
 ## Key API surface
 
 - `POST /api/auth/login` — JWT (PBKDF2-hashed passwords, HS256)
-- `POST /api/transactions`, `GET /api/transactions`, `POST /api/transactions/{id}/reverse`
+- `POST /api/transactions` (manual entry, admins only), `GET /api/transactions`, `POST /api/transactions/{id}/reverse`
 - `POST /api/ingest/batch`, `POST /api/ingest/csv`, `GET /api/ingest/batches`
 - `POST /api/shifts/open`, `POST /api/shifts/{id}/close`, `GET /api/shifts`
 - `POST /api/reconcile/run`, `GET /api/reconcile/runs`
@@ -72,7 +78,21 @@ Self-test suite (spawns its own server on port 8032 and exits):
 - `GET /api/dashboard/stats`
 - `GET /api/audit`, `GET /api/audit/verify`
 - `GET /api/export/transactions.csv`, `GET /api/export/flags.csv`
-- `GET /api/vehicles`, `/api/routes`, `/api/tenants` (tenant-scoped)
+
+### Administration (SACCO_ADMIN / PLATFORM_ADMIN)
+
+- `POST /api/tenants` — onboard a SACCO (platform only)
+- `GET /api/users`, `POST /api/users`, `PATCH /api/users/{id}` — add users,
+  change role, reset password, enable/disable. SACCO admins may only create and
+  manage conductors and auditors in their own SACCO; platform operators may
+  create any role and assign it to a SACCO.
+- `GET /api/vehicles`, `POST /api/vehicles`, `PATCH /api/vehicles/{id}` — add or
+  edit fleet vehicles, capacity and device/POS IDs. Registration and device ID
+  are unique per SACCO.
+- `GET /api/routes`, `POST /api/routes`, `PATCH /api/routes/{id}`,
+  `POST /api/routes/{id}/stages`, `PATCH /api/stages/{id}` — create routes with
+  stage fares, append stages, and adjust fares.
+- `GET /api/tenants` — list SACCOs (platform only)
 
 ## Data model (integrity-relevant)
 

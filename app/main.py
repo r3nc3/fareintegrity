@@ -248,6 +248,7 @@ def list_routes(tenant_id: int | None = Query(None),
         )
         out.append({
             "id": route.id, "name": route.name, "tenant_id": route.tenant_id,
+            "active": route.active,
             "stages": [
                 {"id": s.id, "name": s.name, "order": s.order,
                  "fare_cents": s.fare_cents, "fare_kes": s.fare_cents / 100}
@@ -255,6 +256,393 @@ def list_routes(tenant_id: int | None = Query(None),
             ],
         })
     return out
+
+
+# ---------- administration: tenants, users, fleet, routes ----------
+
+VALID_ROLES = (ROLE_PLATFORM, ROLE_SACCO, ROLE_CONDUCTOR, ROLE_AUDITOR)
+SACCO_ASSIGNABLE_ROLES = (ROLE_CONDUCTOR, ROLE_AUDITOR)
+
+
+def _user_json(u: User, tenant_name: str | None = None) -> dict:
+    return {
+        "id": u.id, "tenant_id": u.tenant_id, "email": u.email,
+        "full_name": u.full_name, "role": u.role, "active": u.active,
+        "tenant_name": tenant_name,
+        "created_at": u.created_at.isoformat() if u.created_at else None,
+    }
+
+
+def _vehicle_json(v: Vehicle) -> dict:
+    return {
+        "id": v.id, "tenant_id": v.tenant_id, "reg_no": v.reg_no,
+        "capacity": v.capacity, "device_id": v.device_id, "active": v.active,
+    }
+
+
+def _route_json(db: Session, route: Route) -> dict:
+    stages = (
+        db.query(Stage).filter(Stage.route_id == route.id)
+        .order_by(Stage.order).all()
+    )
+    return {
+        "id": route.id, "name": route.name, "tenant_id": route.tenant_id,
+        "active": route.active,
+        "stages": [
+            {"id": s.id, "name": s.name, "order": s.order,
+             "fare_cents": s.fare_cents, "fare_kes": s.fare_cents / 100}
+            for s in stages
+        ],
+    }
+
+
+def _target_user(db: Session, actor: User, user_id: int) -> User:
+    target = db.get(User, user_id)
+    if target is None:
+        raise HTTPException(404, "User not found")
+    if actor.role == ROLE_PLATFORM:
+        return target
+    if target.tenant_id != actor.tenant_id or target.role == ROLE_PLATFORM:
+        raise HTTPException(403, "Cross-tenant access denied")
+    return target
+
+
+def _target_vehicle(db: Session, actor: User, vehicle_id: int) -> Vehicle:
+    vehicle = db.get(Vehicle, vehicle_id)
+    if vehicle is None:
+        raise HTTPException(404, "Vehicle not found")
+    ensure_tenant(actor, vehicle.tenant_id)
+    return vehicle
+
+
+def _target_route(db: Session, actor: User, route_id: int) -> Route:
+    route = db.get(Route, route_id)
+    if route is None:
+        raise HTTPException(404, "Route not found")
+    ensure_tenant(actor, route.tenant_id)
+    return route
+
+
+class TenantCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=200)
+    region: str | None = Field(default=None, max_length=120)
+    contact_email: str | None = Field(default=None, max_length=150)
+
+
+@app.post("/api/tenants")
+def create_tenant(body: TenantCreate, db: Session = Depends(get_db),
+                  user: User = Depends(require_roles(ROLE_PLATFORM))):
+    name = body.name.strip()
+    if db.query(Tenant).filter(Tenant.name == name).first():
+        raise HTTPException(409, "A SACCO with that name already exists")
+    tenant = Tenant(
+        name=name,
+        region=(body.region or "").strip() or None,
+        contact_email=(body.contact_email or "").strip() or None,
+    )
+    db.add(tenant)
+    db.flush()
+    log_audit(db, tenant_id=tenant.id, actor_id=user.id, actor_email=user.email,
+              action="TENANT_CREATED", entity="tenant", entity_id=tenant.id,
+              summary=f"SACCO created: {tenant.name}")
+    db.commit()
+    return {"id": tenant.id, "name": tenant.name, "region": tenant.region,
+            "contact_email": tenant.contact_email,
+            "subscription_active": tenant.subscription_active}
+
+
+class UserCreate(BaseModel):
+    tenant_id: int | None = None
+    email: str = Field(min_length=3, max_length=150)
+    password: str = Field(min_length=8, max_length=128)
+    full_name: str = Field(min_length=1, max_length=150)
+    role: str
+
+
+class UserUpdate(BaseModel):
+    full_name: str | None = Field(default=None, min_length=1, max_length=150)
+    password: str | None = Field(default=None, min_length=8, max_length=128)
+    role: str | None = None
+    active: bool | None = None
+
+
+@app.get("/api/users")
+def list_users(tenant_id: int | None = Query(None),
+               db: Session = Depends(get_db),
+               user: User = Depends(require_roles(*MANAGE_ROLES))):
+    tid = _scope(user, tenant_id)
+    query = db.query(User)
+    if tid is not None:
+        query = query.filter(User.tenant_id == tid)
+    tenants = {t.id: t.name for t in db.query(Tenant).all()}
+    return [_user_json(u, tenants.get(u.tenant_id))
+            for u in query.order_by(User.id).all()]
+
+
+@app.post("/api/users")
+def create_user(body: UserCreate, db: Session = Depends(get_db),
+                user: User = Depends(require_roles(*MANAGE_ROLES))):
+    role = body.role.strip().upper()
+    if role not in VALID_ROLES:
+        raise HTTPException(422, f"role must be one of {', '.join(VALID_ROLES)}")
+    email = body.email.strip().lower()
+    if "@" not in email:
+        raise HTTPException(422, "invalid email address")
+
+    if user.role == ROLE_PLATFORM:
+        tenant_id = body.tenant_id
+        if role == ROLE_PLATFORM:
+            tenant_id = None
+        elif tenant_id is None:
+            raise HTTPException(422, "tenant_id is required for non-platform users")
+        elif db.get(Tenant, tenant_id) is None:
+            raise HTTPException(404, "Tenant not found")
+    else:
+        if role not in SACCO_ASSIGNABLE_ROLES:
+            raise HTTPException(
+                403, "SACCO admins may only create conductors and auditors")
+        tenant_id = user.tenant_id
+
+    if db.query(User).filter(User.email == email).first():
+        raise HTTPException(409, "Email is already registered")
+
+    new_user = User(tenant_id=tenant_id, email=email,
+                    password_hash=hash_password(body.password),
+                    full_name=body.full_name.strip(), role=role)
+    db.add(new_user)
+    db.flush()
+    log_audit(db, tenant_id=tenant_id, actor_id=user.id, actor_email=user.email,
+              action="USER_CREATED", entity="user", entity_id=new_user.id,
+              summary=f"{role} created: {email}")
+    db.commit()
+    tenant = db.get(Tenant, tenant_id) if tenant_id else None
+    return _user_json(new_user, tenant.name if tenant else None)
+
+
+@app.patch("/api/users/{user_id}")
+def update_user(user_id: int, body: UserUpdate, db: Session = Depends(get_db),
+                actor: User = Depends(require_roles(*MANAGE_ROLES))):
+    target = _target_user(db, actor, user_id)
+    if (actor.role == ROLE_SACCO and target.id != actor.id
+            and target.role not in SACCO_ASSIGNABLE_ROLES):
+        raise HTTPException(
+            403, "SACCO admins may only manage conductors and auditors")
+    if body.role is not None:
+        role = body.role.strip().upper()
+        if role not in VALID_ROLES:
+            raise HTTPException(422, "invalid role")
+        if (role == ROLE_PLATFORM) != (target.role == ROLE_PLATFORM):
+            raise HTTPException(
+                422, "platform-admin role cannot be changed; create a new user")
+        if actor.role == ROLE_SACCO and role not in SACCO_ASSIGNABLE_ROLES:
+            raise HTTPException(
+                403, "SACCO admins may only assign conductor or auditor roles")
+        target.role = role
+    if body.full_name is not None:
+        target.full_name = body.full_name.strip()
+    if body.password is not None:
+        target.password_hash = hash_password(body.password)
+    if body.active is not None:
+        if target.id == actor.id and not body.active:
+            raise HTTPException(422, "You cannot deactivate your own account")
+        target.active = body.active
+    log_audit(db, tenant_id=target.tenant_id, actor_id=actor.id,
+              actor_email=actor.email, action="USER_UPDATED", entity="user",
+              entity_id=target.id, summary=f"User updated: {target.email}")
+    db.commit()
+    tenant = db.get(Tenant, target.tenant_id) if target.tenant_id else None
+    return _user_json(target, tenant.name if tenant else None)
+
+
+class VehicleCreate(BaseModel):
+    tenant_id: int | None = None
+    reg_no: str = Field(min_length=2, max_length=40)
+    capacity: int = Field(default=14, ge=1, le=100)
+    device_id: str | None = Field(default=None, max_length=80)
+    active: bool = True
+
+
+class VehicleUpdate(BaseModel):
+    reg_no: str | None = Field(default=None, min_length=2, max_length=40)
+    capacity: int | None = Field(default=None, ge=1, le=100)
+    device_id: str | None = Field(default=None, max_length=80)
+    active: bool | None = None
+
+
+def _check_vehicle_unique(db: Session, tenant_id: int, reg_no: str,
+                          device_id: str | None,
+                          exclude_id: int | None = None) -> None:
+    query = db.query(Vehicle).filter(
+        Vehicle.tenant_id == tenant_id, Vehicle.reg_no == reg_no)
+    if exclude_id is not None:
+        query = query.filter(Vehicle.id != exclude_id)
+    if query.first():
+        raise HTTPException(409, "A vehicle with that registration already exists")
+    if device_id:
+        query = db.query(Vehicle).filter(
+            Vehicle.tenant_id == tenant_id, Vehicle.device_id == device_id)
+        if exclude_id is not None:
+            query = query.filter(Vehicle.id != exclude_id)
+        if query.first():
+            raise HTTPException(
+                409, "That device ID is already assigned to a vehicle")
+
+
+@app.post("/api/vehicles")
+def create_vehicle(body: VehicleCreate, db: Session = Depends(get_db),
+                   user: User = Depends(require_roles(*MANAGE_ROLES))):
+    tid = _require_tenant(user, body.tenant_id)
+    reg_no = body.reg_no.strip().upper()
+    device_id = (body.device_id or "").strip() or None
+    _check_vehicle_unique(db, tid, reg_no, device_id)
+    vehicle = Vehicle(tenant_id=tid, reg_no=reg_no, capacity=body.capacity,
+                      device_id=device_id, active=body.active)
+    db.add(vehicle)
+    db.flush()
+    log_audit(db, tenant_id=tid, actor_id=user.id, actor_email=user.email,
+              action="VEHICLE_CREATED", entity="vehicle", entity_id=vehicle.id,
+              summary=f"Vehicle added: {reg_no}")
+    db.commit()
+    return _vehicle_json(vehicle)
+
+
+@app.patch("/api/vehicles/{vehicle_id}")
+def update_vehicle(vehicle_id: int, body: VehicleUpdate,
+                   db: Session = Depends(get_db),
+                   user: User = Depends(require_roles(*MANAGE_ROLES))):
+    vehicle = _target_vehicle(db, user, vehicle_id)
+    reg_no = vehicle.reg_no
+    device_id = vehicle.device_id
+    if body.reg_no is not None:
+        reg_no = body.reg_no.strip().upper()
+    if body.device_id is not None:
+        device_id = body.device_id.strip() or None
+    _check_vehicle_unique(db, vehicle.tenant_id, reg_no, device_id,
+                          exclude_id=vehicle.id)
+    vehicle.reg_no = reg_no
+    vehicle.device_id = device_id
+    if body.capacity is not None:
+        vehicle.capacity = body.capacity
+    if body.active is not None:
+        vehicle.active = body.active
+    log_audit(db, tenant_id=vehicle.tenant_id, actor_id=user.id,
+              actor_email=user.email, action="VEHICLE_UPDATED", entity="vehicle",
+              entity_id=vehicle.id, summary=f"Vehicle updated: {vehicle.reg_no}")
+    db.commit()
+    return _vehicle_json(vehicle)
+
+
+class StageIn(BaseModel):
+    name: str = Field(min_length=1, max_length=150)
+    order: int | None = Field(default=None, ge=0)
+    fare_cents: int = Field(ge=0)
+
+
+class RouteCreate(BaseModel):
+    tenant_id: int | None = None
+    name: str = Field(min_length=1, max_length=200)
+    stages: list[StageIn] = Field(min_length=1)
+
+
+class RouteUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    active: bool | None = None
+
+
+@app.post("/api/routes")
+def create_route(body: RouteCreate, db: Session = Depends(get_db),
+                 user: User = Depends(require_roles(*MANAGE_ROLES))):
+    tid = _require_tenant(user, body.tenant_id)
+    name = body.name.strip()
+    if db.query(Route).filter(Route.tenant_id == tid,
+                              Route.name == name).first():
+        raise HTTPException(409, "A route with that name already exists")
+    route = Route(tenant_id=tid, name=name)
+    db.add(route)
+    db.flush()
+    for index, stage in enumerate(body.stages):
+        db.add(Stage(
+            route_id=route.id, name=stage.name.strip(),
+            order=stage.order if stage.order is not None else index + 1,
+            fare_cents=stage.fare_cents,
+        ))
+    db.flush()
+    log_audit(db, tenant_id=tid, actor_id=user.id, actor_email=user.email,
+              action="ROUTE_CREATED", entity="route", entity_id=route.id,
+              summary=f"Route added: {name} ({len(body.stages)} stages)")
+    db.commit()
+    return _route_json(db, route)
+
+
+@app.patch("/api/routes/{route_id}")
+def update_route(route_id: int, body: RouteUpdate,
+                 db: Session = Depends(get_db),
+                 user: User = Depends(require_roles(*MANAGE_ROLES))):
+    route = _target_route(db, user, route_id)
+    if body.name is not None:
+        name = body.name.strip()
+        clash = db.query(Route).filter(
+            Route.tenant_id == route.tenant_id, Route.name == name,
+            Route.id != route.id).first()
+        if clash:
+            raise HTTPException(409, "A route with that name already exists")
+        route.name = name
+    if body.active is not None:
+        route.active = body.active
+    log_audit(db, tenant_id=route.tenant_id, actor_id=user.id,
+              actor_email=user.email, action="ROUTE_UPDATED", entity="route",
+              entity_id=route.id, summary=f"Route updated: {route.name}")
+    db.commit()
+    return _route_json(db, route)
+
+
+@app.post("/api/routes/{route_id}/stages")
+def add_stage(route_id: int, body: StageIn, db: Session = Depends(get_db),
+              user: User = Depends(require_roles(*MANAGE_ROLES))):
+    route = _target_route(db, user, route_id)
+    order = body.order
+    if order is None:
+        last = (db.query(Stage).filter(Stage.route_id == route.id)
+                .order_by(Stage.order.desc()).first())
+        order = (last.order + 1) if last else 1
+    stage = Stage(route_id=route.id, name=body.name.strip(), order=order,
+                  fare_cents=body.fare_cents)
+    db.add(stage)
+    db.flush()
+    log_audit(db, tenant_id=route.tenant_id, actor_id=user.id,
+              actor_email=user.email, action="STAGE_CREATED", entity="stage",
+              entity_id=stage.id,
+              summary=f"Stage added to {route.name}: {stage.name}")
+    db.commit()
+    return _route_json(db, route)
+
+
+class StageUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=150)
+    order: int | None = Field(default=None, ge=0)
+    fare_cents: int | None = Field(default=None, ge=0)
+
+
+@app.patch("/api/stages/{stage_id}")
+def update_stage(stage_id: int, body: StageUpdate,
+                 db: Session = Depends(get_db),
+                 user: User = Depends(require_roles(*MANAGE_ROLES))):
+    stage = db.get(Stage, stage_id)
+    if stage is None:
+        raise HTTPException(404, "Stage not found")
+    route = db.get(Route, stage.route_id)
+    ensure_tenant(user, route.tenant_id)
+    if body.name is not None:
+        stage.name = body.name.strip()
+    if body.order is not None:
+        stage.order = body.order
+    if body.fare_cents is not None:
+        stage.fare_cents = body.fare_cents
+    log_audit(db, tenant_id=route.tenant_id, actor_id=user.id,
+              actor_email=user.email, action="STAGE_UPDATED", entity="stage",
+              entity_id=stage.id, summary=f"Stage updated: {stage.name}")
+    db.commit()
+    return _route_json(db, route)
 
 
 # ---------- transactions ----------
@@ -280,12 +668,10 @@ class TransactionCreate(BaseModel):
 @app.post("/api/transactions")
 def create_transaction(body: TransactionCreate, db: Session = Depends(get_db),
                        user: User = Depends(require_roles(
-                           ROLE_PLATFORM, ROLE_SACCO, ROLE_CONDUCTOR))):
+                           ROLE_PLATFORM, ROLE_SACCO))):
     tid = _require_tenant(user, body.tenant_id)
     conductor_id = body.conductor_id
-    if user.role == ROLE_CONDUCTOR:
-        conductor_id = user.id
-    elif conductor_id is None:
+    if conductor_id is None:
         conductor_id = user.id
 
     tx = integrity.record_transaction(
@@ -420,7 +806,7 @@ def _ingest_response(batch: IngestBatch, result: dict, missing: list[int]) -> di
 @app.post("/api/ingest/batch")
 def ingest_batch(body: IngestBody, db: Session = Depends(get_db),
                  user: User = Depends(require_roles(
-                     ROLE_PLATFORM, ROLE_SACCO, ROLE_CONDUCTOR))):
+                     ROLE_PLATFORM, ROLE_SACCO))):
     tid = _require_tenant(user, body.tenant_id)
     batch, result, missing = integrity.ingest_records(
         db, tenant_id=tid, source=body.source, records=body.records,

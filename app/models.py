@@ -53,7 +53,10 @@ class User(Base):
 
 class Vehicle(Base):
     __tablename__ = "vehicles"
-    __table_args__ = (UniqueConstraint("tenant_id", "reg_no", name="uq_vehicle_reg"),)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "reg_no", name="uq_vehicle_reg"),
+        UniqueConstraint("tenant_id", "device_id", name="uq_vehicle_device"),
+    )
 
     id = Column(Integer, primary_key=True)
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)

@@ -349,6 +349,154 @@ class Suite:
                        "external_ref": "E2E-AUDIT"}, auditor_token)
         self.check("auditor is read-only (cannot record fares)", code == 403, str(code))
 
+        # --- 8b. administration: users, fleet, routes ----------------------
+        code, new_con = api("POST", "/api/users", {
+            "email": "e2e.con@kiambu.demo", "password": "conpass123",
+            "full_name": "E2E Conductor", "role": "CONDUCTOR",
+        }, self.token)
+        self.check("SACCO admin can add a conductor",
+                   code == 200 and new_con["role"] == "CONDUCTOR"
+                   and new_con["tenant_id"] == 1, str((code, new_con)))
+
+        con_token = login("e2e.con@kiambu.demo", "conpass123")
+        _, con_me = api("GET", "/api/me", token=con_token)
+        self.check("newly added user can sign in",
+                   con_me["role"] == "CONDUCTOR", str(con_me))
+
+        code, con_tx = api("POST", "/api/transactions", {
+            **base, "idempotency_key": "e2e-con-1",
+            "external_ref": "E2E-CON-1",
+        }, con_token)
+        self.check("conductor cannot record fares manually",
+                   code == 403, str((code, con_tx)))
+
+        code, _ = api("POST", "/api/ingest/batch", {
+            "source": "DEVICE", "device_id": "E2E-CON-DEV",
+            "vehicle_id": 1, "records": [],
+        }, con_token)
+        self.check("conductor cannot ingest device batches",
+                   code == 403, str(code))
+
+        code, dup_user = api("POST", "/api/users", {
+            "email": "e2e.con@kiambu.demo", "password": "conpass123",
+            "full_name": "Duplicate", "role": "CONDUCTOR",
+        }, self.token)
+        self.check("duplicate user email -> 409", code == 409, str((code, dup_user)))
+
+        code, _ = api("POST", "/api/users", {
+            "email": "e2e.bad@kiambu.demo", "password": "conpass123",
+            "full_name": "Bad Admin", "role": "SACCO_ADMIN",
+        }, self.token)
+        self.check("SACCO admin cannot create another SACCO admin",
+                   code == 403, str(code))
+
+        code, _ = api("POST", "/api/users", {
+            "email": "e2e.audit2@kiambu.demo", "password": "auditpass123",
+            "full_name": "E2E Auditor", "role": "AUDITOR",
+        }, auditor_token)
+        self.check("auditor cannot add users", code == 403, str(code))
+
+        code, new_vehicle = api("POST", "/api/vehicles", {
+            "reg_no": "e2e 001x", "capacity": 16, "device_id": "E2E-FLEET-DEV",
+        }, self.token)
+        self.check("SACCO admin can add a vehicle",
+                   code == 200 and new_vehicle["reg_no"] == "E2E 001X"
+                   and new_vehicle["tenant_id"] == 1, str((code, new_vehicle)))
+
+        code, _ = api("POST", "/api/vehicles", {
+            "reg_no": "E2E 001X", "capacity": 14,
+        }, self.token)
+        self.check("duplicate vehicle registration -> 409", code == 409, str(code))
+
+        code, _ = api("POST", "/api/vehicles", {
+            "reg_no": "E2E 002X", "capacity": 14, "device_id": "E2E-FLEET-DEV",
+        }, self.token)
+        self.check("duplicate device assignment -> 409", code == 409, str(code))
+
+        code, patched_vehicle = api("PATCH", f"/api/vehicles/{new_vehicle['id']}", {
+            "capacity": 18, "device_id": "E2E-FLEET-DEV-2",
+        }, self.token)
+        self.check("vehicle can be edited",
+                   code == 200 and patched_vehicle["capacity"] == 18
+                   and patched_vehicle["device_id"] == "E2E-FLEET-DEV-2",
+                   str((code, patched_vehicle)))
+
+        code, new_tenant = api("POST", "/api/tenants", {
+            "name": "E2E Test SACCO", "region": "Nairobi",
+            "contact_email": "ops@e2e.test",
+        }, platform_token)
+        self.check("platform operator can onboard a SACCO",
+                   code == 200 and new_tenant["name"] == "E2E Test SACCO",
+                   str((code, new_tenant)))
+
+        code, tenant_admin = api("POST", "/api/users", {
+            "tenant_id": new_tenant["id"], "email": "e2e.admin@test.demo",
+            "password": "sacpass123", "full_name": "E2E SACCO Admin",
+            "role": "SACCO_ADMIN",
+        }, platform_token)
+        self.check("platform can add a SACCO admin",
+                   code == 200 and tenant_admin["tenant_id"] == new_tenant["id"],
+                   str((code, tenant_admin)))
+
+        tenant_token = login("e2e.admin@test.demo", "sacpass123")
+        code, tenant_route = api("POST", "/api/routes", {
+            "name": "E2E Route",
+            "stages": [
+                {"name": "E2E Start", "fare_cents": 3000},
+                {"name": "E2E End", "fare_cents": 8000},
+            ],
+        }, tenant_token)
+        self.check("new SACCO can create a route with stages",
+                   code == 200 and len(tenant_route["stages"]) == 2
+                   and tenant_route["tenant_id"] == new_tenant["id"],
+                   str((code, tenant_route)))
+
+        code, tenant_vehicle = api("POST", "/api/vehicles", {
+            "reg_no": "E2E 777Y", "capacity": 14,
+            "device_id": "E2E-NEW-SACCO-DEV",
+        }, tenant_token)
+        self.check("new SACCO can add a vehicle",
+                   code == 200 and tenant_vehicle["tenant_id"] == new_tenant["id"],
+                   str((code, tenant_vehicle)))
+
+        code, tenant_tx = api("POST", "/api/transactions", {
+            "vehicle_id": tenant_vehicle["id"], "route_id": tenant_route["id"],
+            "stage_id": tenant_route["stages"][1]["id"], "passenger_count": 1,
+            "amount_cents": 8000, "method": "CASH",
+            "external_ref": "E2E-NEW-TKT", "idempotency_key": "e2e-new-1",
+        }, tenant_token)
+        self.check("new SACCO can record a fare on its own route",
+                   code == 200 and tenant_tx["tenant_id"] == new_tenant["id"],
+                   str((code, tenant_tx)))
+
+        code, route_with_stage = api(
+            "POST", f"/api/routes/{tenant_route['id']}/stages",
+            {"name": "E2E Middle", "fare_cents": 5500}, tenant_token)
+        self.check("stage can be appended to a route",
+                   code == 200 and len(route_with_stage["stages"]) == 3,
+                   str((code, route_with_stage)))
+
+        code, _ = api("GET", f"/api/users?tenant_id={new_tenant['id']}",
+                      token=self.token)
+        self.check("SACCO admin cannot read another SACCO's users",
+                   code == 403, str(code))
+
+        code, _ = api("PATCH", f"/api/vehicles/{tenant_vehicle['id']}",
+                      {"capacity": 20}, self.token)
+        self.check("SACCO admin cannot edit another SACCO's fleet",
+                   code == 403, str(code))
+
+        _, tenant_users = api("GET", "/api/users", token=tenant_token)
+        self.check("new SACCO sees only its own users",
+                   all(u["tenant_id"] == new_tenant["id"] for u in tenant_users),
+                   str(tenant_users))
+
+        _, me = api("GET", "/api/me", token=self.token)
+        code, _ = api("PATCH", f"/api/users/{me['id']}", {"active": False},
+                      self.token)
+        self.check("admin cannot deactivate their own account",
+                   code == 422, str(code))
+
         # --- 9. audit chain integrity (tamper test last) -------------------
         _, verify = api("GET", "/api/audit/verify", token=self.token)
         self.check("audit chain verifies clean", verify.get("ok") is True, str(verify))

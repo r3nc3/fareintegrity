@@ -14,20 +14,13 @@
     <h1>FareGuard</h1>
     <p class="sub">Fare record integrity platform</p>
     <label>Email
-      <input id="login-email" type="email" value="admin@kiambu.demo" required>
+      <input id="login-email" type="email" placeholder="you@example.com" required>
     </label>
     <label>Password
-      <input id="login-password" type="password" value="sacco1234" required>
+      <input id="login-password" type="password" placeholder="Password" required>
     </label>
     <button type="submit" class="btn primary">Sign in</button>
     <p id="login-error" class="error"></p>
-    <div class="demo-accounts">
-      <span>Demo:</span>
-      <code>admin@kiambu.demo / sacco1234</code>
-      <code>con@kiambu.demo / con12345</code>
-      <code>auditor@kiambu.demo / audit1234</code>
-      <code>platform@fareguard.demo / admin1234</code>
-    </div>
   </form>
 </div>
 
@@ -46,6 +39,7 @@
       <button class="nav-item" data-page="ingest">Device ingest</button>
       <button class="nav-item" data-page="anomalies">Anomalies</button>
       <button class="nav-item" data-page="reconciliation">Reconciliation</button>
+      <button class="nav-item" data-page="admin">Manage</button>
       <button class="nav-item" data-page="audit">Audit trail</button>
     </nav>
     <div class="side-foot">
@@ -129,7 +123,8 @@
     <!-- TRANSACTIONS -->
     <section id="page-transactions" class="page hidden">
       <div id="record-panel" class="panel">
-        <div class="panel-head"><h3>Record a fare</h3></div>
+        <div class="panel-head"><h3>Manual fare entry (exception)</h3></div>
+        <p class="muted small">Device and CSV ingestion is the primary record source. Use manual entry only to add or correct an exceptional record.</p>
         <form id="record-form" class="form-grid">
           <label>Vehicle <select id="rf-vehicle" required></select></label>
           <label>Route <select id="rf-route" required></select></label>
@@ -236,6 +231,88 @@ CSV-002,2,Kahawa West,1,70,CASH,2026-11-09T08:10:00</textarea>
       <div class="panel">
         <div class="panel-head"><h3>Reconciliation history</h3></div>
         <div class="table-wrap"><table id="recon-table"></table></div>
+      </div>
+    </section>
+
+    <!-- MANAGE -->
+    <section id="page-admin" class="page hidden">
+      <div id="tenant-panel" class="panel hidden">
+        <div class="panel-head"><h3>Onboard a SACCO</h3></div>
+        <form id="tenant-form" class="form-grid">
+          <label>SACCO name <input id="tn-name" required maxlength="200"></label>
+          <label>Region <input id="tn-region" maxlength="120"></label>
+          <label>Contact email <input id="tn-email" type="email" maxlength="150"></label>
+          <div class="wide form-actions">
+            <button class="btn primary" type="submit">Create SACCO</button>
+            <span id="tn-result" class="muted small"></span>
+          </div>
+        </form>
+      </div>
+
+      <div class="grid two">
+        <div class="panel">
+          <div class="panel-head"><h3>Add user</h3></div>
+          <form id="user-form" class="form-grid">
+            <label>Full name <input id="usr-name" required maxlength="150"></label>
+            <label>Email <input id="usr-email" type="email" required maxlength="150"></label>
+            <label>Password <input id="usr-password" type="password" minlength="8" required></label>
+            <label>Role <select id="usr-role"></select></label>
+            <label id="usr-tenant-wrap" class="hidden">SACCO <select id="usr-tenant"></select></label>
+            <div class="wide form-actions">
+              <button class="btn primary" type="submit">Add user</button>
+              <span id="usr-result" class="muted small"></span>
+            </div>
+          </form>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h3>Add vehicle</h3></div>
+          <form id="vehicle-form" class="form-grid">
+            <label>Registration <input id="veh-reg" placeholder="KDD 123A" required maxlength="40"></label>
+            <label>Capacity <input id="veh-cap" type="number" min="1" max="100" value="14" required></label>
+            <label>Device ID <input id="veh-device" placeholder="DEV-KDD123A" maxlength="80"></label>
+            <div class="wide form-actions">
+              <button class="btn primary" type="submit">Add vehicle</button>
+              <span id="veh-result" class="muted small"></span>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h3>Users</h3>
+          <button class="btn ghost small" id="usr-refresh">Refresh</button>
+        </div>
+        <div class="table-wrap"><table id="user-table"></table></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h3>Fleet</h3>
+          <button class="btn ghost small" id="veh-refresh">Refresh</button>
+        </div>
+        <div class="table-wrap"><table id="vehicle-table"></table></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h3>Add route</h3></div>
+        <form id="route-form" class="form-grid">
+          <label class="wide">Route name <input id="rt-name" placeholder="Kiambu Town — Nairobi CBD" required maxlength="200"></label>
+          <div class="wide">
+            <div id="stage-rows"></div>
+            <button type="button" class="btn ghost small" id="stage-add">+ Add stage</button>
+          </div>
+          <div class="wide form-actions">
+            <button class="btn primary" type="submit">Create route</button>
+            <span id="rt-result" class="muted small"></span>
+          </div>
+        </form>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h3>Routes &amp; stages</h3></div>
+        <div class="table-wrap"><table id="route-table"></table></div>
       </div>
     </section>
 
