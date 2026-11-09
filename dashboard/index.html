@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FareGuard — Fare Record Integrity</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div id="login-view" class="login-wrap">
+  <form id="login-form" class="login-card" autocomplete="on">
+    <div class="brand-mark">FG</div>
+    <h1>FareGuard</h1>
+    <p class="sub">Fare record integrity platform</p>
+    <label>Email
+      <input id="login-email" type="email" value="admin@kiambu.demo" required>
+    </label>
+    <label>Password
+      <input id="login-password" type="password" value="sacco1234" required>
+    </label>
+    <button type="submit" class="btn primary">Sign in</button>
+    <p id="login-error" class="error"></p>
+    <div class="demo-accounts">
+      <span>Demo:</span>
+      <code>admin@kiambu.demo / sacco1234</code>
+      <code>con@kiambu.demo / con12345</code>
+      <code>auditor@kiambu.demo / audit1234</code>
+      <code>platform@fareguard.demo / admin1234</code>
+    </div>
+  </form>
+</div>
+
+<div id="app-view" class="app hidden">
+  <aside class="sidebar">
+    <div class="side-brand">
+      <div class="brand-mark small">FG</div>
+      <div>
+        <strong>FareGuard</strong>
+        <span>Integrity, not payments</span>
+      </div>
+    </div>
+    <nav id="nav">
+      <button class="nav-item active" data-page="overview">Overview</button>
+      <button class="nav-item" data-page="transactions">Transactions</button>
+      <button class="nav-item" data-page="ingest">Device ingest</button>
+      <button class="nav-item" data-page="anomalies">Anomalies</button>
+      <button class="nav-item" data-page="reconciliation">Reconciliation</button>
+      <button class="nav-item" data-page="audit">Audit trail</button>
+    </nav>
+    <div class="side-foot">
+      <div id="user-chip" class="user-chip"></div>
+      <button id="logout-btn" class="btn ghost small">Sign out</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <h2 id="page-title">Overview</h2>
+        <p id="page-subtitle" class="muted"></p>
+      </div>
+      <div class="topbar-right">
+        <label id="tenant-wrap" class="tenant-select hidden">
+          SACCO
+          <select id="tenant-select"></select>
+        </label>
+        <span id="scope-badge" class="badge"></span>
+      </div>
+    </header>
+
+    <div id="toast" class="toast hidden"></div>
+
+    <!-- OVERVIEW -->
+    <section id="page-overview" class="page">
+      <div class="cards">
+        <div class="card score-card">
+          <span class="card-label">Integrity score</span>
+          <div id="stat-score" class="score">—</div>
+          <span id="stat-score-note" class="muted small">out of 100</span>
+        </div>
+        <div class="card">
+          <span class="card-label">Open anomalies</span>
+          <div id="stat-open" class="stat">—</div>
+          <span id="stat-sev" class="muted small"></span>
+        </div>
+        <div class="card">
+          <span class="card-label">Transactions today</span>
+          <div id="stat-today" class="stat">—</div>
+          <span id="stat-today-amt" class="muted small"></span>
+        </div>
+        <div class="card">
+          <span class="card-label">Missing records</span>
+          <div id="stat-missing" class="stat">—</div>
+          <span class="muted small">device sequence gaps</span>
+        </div>
+        <div class="card">
+          <span class="card-label">Duplicate suspects</span>
+          <div id="stat-dupes" class="stat">—</div>
+          <span class="muted small">fingerprint / receipt</span>
+        </div>
+        <div class="card">
+          <span class="card-label">Cash mismatches</span>
+          <div id="stat-cash" class="stat">—</div>
+          <span class="muted small">declared vs recorded</span>
+        </div>
+      </div>
+
+      <div class="grid two">
+        <div class="panel">
+          <div class="panel-head"><h3>Anomalies by severity</h3></div>
+          <div id="severity-bars" class="bars"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>Anomalies by type</h3></div>
+          <div id="kind-bars" class="bars"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h3>Recent anomalies</h3>
+          <button class="btn ghost small" data-goto="anomalies">View all</button>
+        </div>
+        <div class="table-wrap"><table id="recent-flags-table"></table></div>
+      </div>
+    </section>
+
+    <!-- TRANSACTIONS -->
+    <section id="page-transactions" class="page hidden">
+      <div id="record-panel" class="panel">
+        <div class="panel-head"><h3>Record a fare</h3></div>
+        <form id="record-form" class="form-grid">
+          <label>Vehicle <select id="rf-vehicle" required></select></label>
+          <label>Route <select id="rf-route" required></select></label>
+          <label>Stage <select id="rf-stage" required></select></label>
+          <label>Passengers <input id="rf-passengers" type="number" min="1" value="1" required></label>
+          <label>Tender <select id="rf-method">
+            <option>CASH</option><option>MPESA</option><option>CARD</option>
+          </select></label>
+          <label>Amount (KES) <input id="rf-amount" type="number" min="0" step="0.01" required></label>
+          <label>Ticket reference <input id="rf-ref" placeholder="auto-generated"></label>
+          <label>Provider receipt <input id="rf-receipt" placeholder="M-PESA / card ref"></label>
+          <label class="wide">Occurred at <input id="rf-when" type="datetime-local"></label>
+          <div class="wide form-actions">
+            <button type="submit" class="btn primary">Record fare</button>
+            <span id="rf-result" class="muted small"></span>
+          </div>
+        </form>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h3>Transactions</h3>
+          <div class="filters">
+            <input id="tf-day" type="date" title="Filter by day">
+            <select id="tf-method"><option value="">All methods</option><option>CASH</option><option>MPESA</option><option>CARD</option></select>
+            <select id="tf-integrity"><option value="">All integrity</option><option>OK</option><option>FLAGGED</option></select>
+            <button class="btn ghost small" id="tf-refresh">Refresh</button>
+            <button class="btn ghost small" id="tf-export">Export CSV</button>
+          </div>
+        </div>
+        <div class="table-wrap"><table id="tx-table"></table></div>
+      </div>
+    </section>
+
+    <!-- INGEST -->
+    <section id="page-ingest" class="page hidden">
+      <div class="grid two">
+        <div class="panel">
+          <div class="panel-head"><h3>Device / API batch</h3></div>
+          <p class="muted small">Paste the records a fare device synced. Sequence gaps are detected automatically.</p>
+          <label>Device ID <input id="ing-device" value="DEV-KDG406B"></label>
+          <label>Vehicle <select id="ing-vehicle"></select></label>
+          <label>Records (JSON array)
+            <textarea id="ing-json" rows="10"></textarea>
+          </label>
+          <button id="ing-run" class="btn primary">Ingest batch</button>
+          <pre id="ing-result" class="result"></pre>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>CSV import</h3></div>
+          <p class="muted small">Columns: external_ref, device_seq, stage, passenger_count, amount, method, occurred_at, provider_receipt.</p>
+          <label>Device ID <input id="csv-device" value="DEV-CSV"></label>
+          <label>Vehicle <select id="csv-vehicle"></select></label>
+          <label>CSV
+            <textarea id="csv-text" rows="10">external_ref,device_seq,stage,passenger_count,amount,method,occurred_at
+CSV-001,1,Ruiru,1,40,CASH,2026-11-09T08:00:00
+CSV-002,2,Kahawa West,1,70,CASH,2026-11-09T08:10:00</textarea>
+          </label>
+          <button id="csv-run" class="btn primary">Import CSV</button>
+          <pre id="csv-result" class="result"></pre>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h3>Recent ingest batches</h3></div>
+        <div class="table-wrap"><table id="batch-table"></table></div>
+      </div>
+    </section>
+
+    <!-- ANOMALIES -->
+    <section id="page-anomalies" class="page hidden">
+      <div class="panel">
+        <div class="panel-head">
+          <h3>Integrity anomalies</h3>
+          <div class="filters">
+            <select id="af-status">
+              <option value="">All statuses</option>
+              <option value="OPEN">Open</option>
+              <option value="INVESTIGATING">Investigating</option>
+              <option value="RESOLVED">Resolved</option>
+              <option value="DISMISSED">Dismissed</option>
+            </select>
+            <select id="af-severity">
+              <option value="">All severities</option>
+              <option>HIGH</option><option>MEDIUM</option><option>LOW</option>
+            </select>
+            <button class="btn ghost small" id="af-refresh">Refresh</button>
+            <button class="btn ghost small" id="af-export">Export CSV</button>
+          </div>
+        </div>
+        <div class="table-wrap"><table id="flag-table"></table></div>
+      </div>
+    </section>
+
+    <!-- RECONCILIATION -->
+    <section id="page-reconciliation" class="page hidden">
+      <div class="panel">
+        <div class="panel-head"><h3>Run reconciliation</h3></div>
+        <form id="recon-form" class="inline-form">
+          <label>Day <input id="recon-day" type="date"></label>
+          <button class="btn primary" type="submit">Run reconciliation</button>
+          <span id="recon-result" class="muted small"></span>
+        </form>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h3>Reconciliation history</h3></div>
+        <div class="table-wrap"><table id="recon-table"></table></div>
+      </div>
+    </section>
+
+    <!-- AUDIT -->
+    <section id="page-audit" class="page hidden">
+      <div class="panel">
+        <div class="panel-head">
+          <h3>Tamper-evident audit chain</h3>
+          <div class="filters">
+            <button class="btn primary small" id="audit-verify">Verify chain</button>
+            <span id="audit-verify-result" class="muted small"></span>
+          </div>
+        </div>
+        <p class="muted small">Each entry is linked to the previous by SHA-256. Any edit or deletion breaks the chain.</p>
+        <div class="table-wrap"><table id="audit-table"></table></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
