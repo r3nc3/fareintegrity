@@ -19,6 +19,7 @@ const PAGE_META = {
   ingest: ["Device ingest", "Sync device / CSV records and detect gaps"],
   anomalies: ["Anomalies", "Duplicates, gaps, mismatches and cash variances"],
   reconciliation: ["Reconciliation", "Shift and period reconciliation runs"],
+  reports: ["Reports", "Daily sales and fleet performance"],
   admin: ["Manage", "Users, fleet and route setup"],
   audit: ["Audit trail", "Append-only, hash-chained evidence"],
 };
@@ -171,7 +172,7 @@ async function bootstrap() {
   await loadMasters();
   applyRole();
   updateScopeBadge();
-  navigate("overview");
+  navigate(state.user.role === "CONDUCTOR" ? "transactions" : "overview");
 }
 
 async function loadMasters() {
@@ -214,12 +215,13 @@ function applyRole() {
     $("#recon-form")?.closest(".panel")?.classList.add("hidden");
   }
   if (role === "CONDUCTOR") {
+    hide("overview");
     hide("ingest");
     hide("anomalies");
     hide("audit");
     hide("reconciliation");
+    hide("reports");
     hide("admin");
-    $("#record-panel").classList.add("hidden");
   }
   if (!canManage()) hide("admin");
 }
@@ -273,14 +275,18 @@ function navigate(page) {
     b.classList.toggle("active", b.dataset.page === page);
   });
   const meta = PAGE_META[page] || ["", ""];
-  $("#page-title").textContent = meta[0];
-  $("#page-subtitle").textContent = meta[1];
+  const conductorHistory = page === "transactions"
+    && state.user?.role === "CONDUCTOR";
+  $("#page-title").textContent = conductorHistory ? "My transactions" : meta[0];
+  $("#page-subtitle").textContent = conductorHistory
+    ? "Fares you recorded" : meta[1];
   const renderers = {
     overview: renderOverview,
     transactions: renderTransactions,
     ingest: renderIngest,
     anomalies: renderAnomalies,
     reconciliation: renderReconciliation,
+    reports: renderReports,
     admin: renderAdmin,
     audit: renderAudit,
   };
@@ -304,7 +310,23 @@ async function renderOverview() {
   $("#stat-cash").textContent = stats.cash_mismatches;
   renderBars("#severity-bars", stats.by_severity, true);
   renderBars("#kind-bars", stats.by_kind, false);
+  renderFleetTable(stats.by_vehicle || []);
   renderFlagsTable("#recent-flags-table", stats.recent_flags, false);
+}
+
+function renderFleetTable(rows) {
+  const el = $("#fleet-table");
+  if (!rows.length) {
+    el.innerHTML = `<tbody><tr><td class="empty">No collections today.</td></tr></tbody>`;
+    return;
+  }
+  const head = `<thead><tr><th>Vehicle</th><th>Trips</th><th>Collected</th></tr></thead>`;
+  const body = rows.map((row) => `<tr>
+    <td><strong>${esc(row.reg_no)}</strong></td>
+    <td>${row.trips}</td>
+    <td>${kes(row.amount_cents)}</td>
+  </tr>`).join("");
+  el.innerHTML = head + `<tbody>${body}</tbody>`;
 }
 
 function renderBars(selector, data, severityColors) {
@@ -591,6 +613,42 @@ async function verifyAudit() {
   } catch (err) {
     toast(err.message, true);
   }
+}
+
+/* ---------- reports ---------- */
+
+async function renderReports() {
+  const day = $("#report-day").value || todayInput();
+  const report = await api("GET", scopeParam("/api/reports/sales?day=" + day));
+  $("#rep-count").textContent = report.transaction_count;
+  $("#rep-total").textContent = kes(report.total_amount_cents);
+  $("#rep-flagged").textContent = report.flagged_count;
+  $("#rep-reversed").textContent = report.reversed_count;
+  renderReportTable("#rep-vehicle-table", report.by_vehicle, "Vehicle", "reg_no");
+  renderReportTable("#rep-route-table", report.by_route, "Route", "name");
+  renderReportTable("#rep-conductor-table", report.by_conductor, "Conductor", "name");
+}
+
+function renderReportTable(selector, rows, label, key) {
+  const el = $(selector);
+  if (!rows.length) {
+    el.innerHTML = `<tbody><tr><td class="empty">No collections for this day.</td></tr></tbody>`;
+    return;
+  }
+  const head = `<thead><tr>
+    <th>${esc(label)}</th><th>Trips</th><th>Collected</th>
+  </tr></thead>`;
+  const body = rows.map((row) => `<tr>
+    <td><strong>${esc(row[key])}</strong></td>
+    <td>${row.trips}</td>
+    <td>${kes(row.amount_cents)}</td>
+  </tr>`).join("");
+  el.innerHTML = head + `<tbody>${body}</tbody>`;
+}
+
+function exportReport() {
+  const day = $("#report-day").value || todayInput();
+  window.open(scopeParam("/api/export/sales.csv?day=" + day), "_blank");
 }
 
 /* ---------- manage: users, fleet, routes ---------- */
@@ -882,6 +940,11 @@ function bindEvents() {
   $("#usr-refresh").addEventListener("click", renderAdmin);
   $("#veh-refresh").addEventListener("click", renderAdmin);
 
+  $("#report-run").addEventListener("click", renderReports);
+  $("#report-day").addEventListener("change", renderReports);
+  $("#report-export").addEventListener("click", exportReport);
+  $("#ov-refresh").addEventListener("click", renderOverview);
+
   document.addEventListener("click", async (event) => {
     const goto = event.target.closest("[data-goto]");
     if (goto) { navigate(goto.dataset.goto); return; }
@@ -1015,11 +1078,17 @@ function bindEvents() {
 document.addEventListener("DOMContentLoaded", () => {
   bindEvents();
   $("#recon-day").value = todayInput();
+  $("#report-day").value = todayInput();
   resetStageRows();
   $("#ing-json").value = JSON.stringify([
     { external_ref: "DEV-1001", device_seq: 1, stage: "Ruiru", passenger_count: 1, amount: 40, method: "CASH", occurred_at: "2026-11-09T08:00:00" },
     { external_ref: "DEV-1002", device_seq: 2, stage: "Ruiru", passenger_count: 1, amount: 40, method: "CASH", occurred_at: "2026-11-09T08:10:00" },
     { external_ref: "DEV-1004", device_seq: 4, stage: "Kahawa West", passenger_count: 1, amount: 70, method: "CASH", occurred_at: "2026-11-09T08:20:00" },
   ], null, 2);
+  setInterval(() => {
+    if (state.token && state.page === "overview") {
+      renderOverview().catch(() => {});
+    }
+  }, 30000);
   resume();
 });

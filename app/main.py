@@ -668,10 +668,12 @@ class TransactionCreate(BaseModel):
 @app.post("/api/transactions")
 def create_transaction(body: TransactionCreate, db: Session = Depends(get_db),
                        user: User = Depends(require_roles(
-                           ROLE_PLATFORM, ROLE_SACCO))):
+                           ROLE_PLATFORM, ROLE_SACCO, ROLE_CONDUCTOR))):
     tid = _require_tenant(user, body.tenant_id)
     conductor_id = body.conductor_id
-    if conductor_id is None:
+    if user.role == ROLE_CONDUCTOR:
+        conductor_id = user.id
+    elif conductor_id is None:
         conductor_id = user.id
 
     tx = integrity.record_transaction(
@@ -706,6 +708,8 @@ def list_transactions(method: str | None = None,
     query = db.query(FareTransaction)
     if tid is not None:
         query = query.filter(FareTransaction.tenant_id == tid)
+    if user.role == ROLE_CONDUCTOR:
+        query = query.filter(FareTransaction.conductor_id == user.id)
     if method:
         query = query.filter(FareTransaction.method == method.upper())
     if status:
@@ -741,6 +745,8 @@ def get_transaction(tx_id: int, db: Session = Depends(get_db),
     if tx is None:
         raise HTTPException(404, "Transaction not found")
     ensure_tenant(user, tx.tenant_id)
+    if user.role == ROLE_CONDUCTOR and tx.conductor_id != user.id:
+        raise HTTPException(403, "You can only view your own transactions")
     return _tx_json(tx)
 
 
@@ -1092,14 +1098,25 @@ def dashboard_stats(tenant_id: int | None = Query(None),
     )
     if tid is not None:
         query = query.filter(FareTransaction.tenant_id == tid)
+    if user.role == ROLE_CONDUCTOR:
+        query = query.filter(FareTransaction.conductor_id == user.id)
     txs = query.all()
 
     by_method: dict[str, dict] = {}
+    by_vehicle: dict[int, dict] = {}
+    vehicles = {v.id: v.reg_no for v in db.query(Vehicle).all()}
     for tx in txs:
         bucket = by_method.setdefault(
             tx.method, {"count": 0, "amount_cents": 0})
         bucket["count"] += 1
         bucket["amount_cents"] += tx.amount_cents
+        fleet = by_vehicle.setdefault(tx.vehicle_id, {
+            "vehicle_id": tx.vehicle_id,
+            "reg_no": vehicles.get(tx.vehicle_id, str(tx.vehicle_id)),
+            "trips": 0, "amount_cents": 0,
+        })
+        fleet["trips"] += 1
+        fleet["amount_cents"] += tx.amount_cents
 
     summary = _flag_summary(db, tid)
     recent_query = db.query(IntegrityFlag)
@@ -1113,6 +1130,8 @@ def dashboard_stats(tenant_id: int | None = Query(None),
         "transactions_today": len(txs),
         "total_amount_cents": sum(t.amount_cents for t in txs),
         "by_method": by_method,
+        "by_vehicle": sorted(
+            by_vehicle.values(), key=lambda r: -r["amount_cents"]),
         "integrity_score": integrity.compute_integrity_score(db, tid),
         "open_flags": summary["open"],
         "by_severity": summary["by_severity"],
@@ -1126,6 +1145,106 @@ def dashboard_stats(tenant_id: int | None = Query(None),
         "amount_mismatches": by_kind.get("AMOUNT_MISMATCH", 0),
         "recent_flags": [_flag_json(f) for f in recent],
     }
+
+
+# ---------- reports ----------
+
+def _sales_report(db: Session, tenant_id: int | None, day: date) -> dict:
+    start = datetime(day.year, day.month, day.day)
+    end = start + timedelta(days=1)
+    query = db.query(FareTransaction).filter(
+        FareTransaction.occurred_at >= start,
+        FareTransaction.occurred_at < end,
+    )
+    if tenant_id is not None:
+        query = query.filter(FareTransaction.tenant_id == tenant_id)
+    txs = query.all()
+    recorded = [t for t in txs if t.status != "REVERSED"]
+
+    vehicles = {v.id: v.reg_no for v in db.query(Vehicle).all()}
+    routes = {r.id: r.name for r in db.query(Route).all()}
+    users = {u.id: u.full_name for u in db.query(User).all()}
+
+    by_method: dict[str, dict] = {}
+    by_vehicle: dict[int, dict] = {}
+    by_route: dict[int, dict] = {}
+    by_conductor: dict[int, dict] = {}
+    for tx in recorded:
+        method = by_method.setdefault(
+            tx.method, {"count": 0, "amount_cents": 0})
+        method["count"] += 1
+        method["amount_cents"] += tx.amount_cents
+
+        vehicle = by_vehicle.setdefault(tx.vehicle_id, {
+            "vehicle_id": tx.vehicle_id,
+            "reg_no": vehicles.get(tx.vehicle_id, str(tx.vehicle_id)),
+            "trips": 0, "amount_cents": 0,
+        })
+        vehicle["trips"] += 1
+        vehicle["amount_cents"] += tx.amount_cents
+
+        route = by_route.setdefault(tx.route_id, {
+            "route_id": tx.route_id,
+            "name": routes.get(tx.route_id, str(tx.route_id)),
+            "trips": 0, "amount_cents": 0,
+        })
+        route["trips"] += 1
+        route["amount_cents"] += tx.amount_cents
+
+        if tx.conductor_id:
+            conductor = by_conductor.setdefault(tx.conductor_id, {
+                "conductor_id": tx.conductor_id,
+                "name": users.get(tx.conductor_id, str(tx.conductor_id)),
+                "trips": 0, "amount_cents": 0,
+            })
+            conductor["trips"] += 1
+            conductor["amount_cents"] += tx.amount_cents
+
+    def ordered(rows: dict) -> list[dict]:
+        return sorted(rows.values(), key=lambda row: -row["amount_cents"])
+
+    return {
+        "day": day.isoformat(),
+        "transaction_count": len(recorded),
+        "total_amount_cents": sum(t.amount_cents for t in recorded),
+        "reversed_count": len(txs) - len(recorded),
+        "flagged_count": sum(
+            1 for t in recorded if t.integrity_status == "FLAGGED"),
+        "by_method": by_method,
+        "by_vehicle": ordered(by_vehicle),
+        "by_route": ordered(by_route),
+        "by_conductor": ordered(by_conductor),
+    }
+
+
+@app.get("/api/reports/sales")
+def sales_report(day: date | None = None,
+                 tenant_id: int | None = Query(None),
+                 db: Session = Depends(get_db),
+                 user: User = Depends(require_roles(
+                     ROLE_PLATFORM, ROLE_SACCO, ROLE_AUDITOR))):
+    tid = _scope(user, tenant_id)
+    return _sales_report(db, tid, day or utcnow().date())
+
+
+@app.get("/api/export/sales.csv")
+def export_sales(day: date | None = None,
+                 tenant_id: int | None = Query(None),
+                 db: Session = Depends(get_db),
+                 user: User = Depends(require_roles(
+                     ROLE_PLATFORM, ROLE_SACCO, ROLE_AUDITOR))):
+    tid = _scope(user, tenant_id)
+    report = _sales_report(db, tid, day or utcnow().date())
+    rows = [
+        [r["vehicle_id"], r["reg_no"], r["trips"],
+         r["amount_cents"], f"{r['amount_cents'] / 100:.2f}"]
+        for r in report["by_vehicle"]
+    ]
+    return _csv_response(
+        rows,
+        ["vehicle_id", "reg_no", "trips", "amount_cents", "amount_kes"],
+        f"sales_{report['day']}.csv",
+    )
 
 
 # ---------- audit ----------

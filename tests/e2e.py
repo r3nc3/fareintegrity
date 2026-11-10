@@ -367,8 +367,21 @@ class Suite:
             **base, "idempotency_key": "e2e-con-1",
             "external_ref": "E2E-CON-1",
         }, con_token)
-        self.check("conductor cannot record fares manually",
-                   code == 403, str((code, con_tx)))
+        self.check("conductor can record a fare",
+                   code == 200 and con_tx["status"] == "RECORDED"
+                   and con_tx["conductor_id"] == con_me["id"],
+                   str((code, con_tx)))
+
+        _, con_rows = api("GET", "/api/transactions?limit=200",
+                          token=con_token)
+        self.check("conductor sees only their own transactions",
+                   all(t["conductor_id"] == con_me["id"] for t in con_rows)
+                   and any(t["id"] == con_tx["id"] for t in con_rows),
+                   str(con_rows[:3]))
+
+        code, _ = api("GET", f"/api/transactions/{tx['id']}", token=con_token)
+        self.check("conductor cannot view another conductor's transaction",
+                   code == 403, str(code))
 
         code, _ = api("POST", "/api/ingest/batch", {
             "source": "DEVICE", "device_id": "E2E-CON-DEV",
@@ -496,6 +509,32 @@ class Suite:
                       self.token)
         self.check("admin cannot deactivate their own account",
                    code == 422, str(code))
+
+        # --- 8c. collections dashboard + sales reports ---------------------
+        _, stats = api("GET", "/api/dashboard/stats", token=self.token)
+        self.check("dashboard exposes fleet collections today",
+                   isinstance(stats.get("by_vehicle"), list)
+                   and any(v["reg_no"] for v in stats["by_vehicle"]),
+                   str(stats.get("by_vehicle")))
+
+        _, report = api(
+            "GET", f"/api/reports/sales?day={self.today.isoformat()}",
+            token=self.token)
+        self.check("daily sales report summarises fleet and routes",
+                   report["transaction_count"] >= 1
+                   and report["total_amount_cents"] > 0
+                   and isinstance(report["by_vehicle"], list)
+                   and isinstance(report["by_route"], list),
+                   str(report)[:200])
+
+        sales_csv = get_text(
+            f"/api/export/sales.csv?day={self.today.isoformat()}", self.token)
+        self.check("sales report exports as CSV",
+                   sales_csv.startswith("vehicle_id,reg_no,trips"))
+
+        code, _ = api("GET", "/api/reports/sales", token=con_token)
+        self.check("conductor cannot access sales reports",
+                   code == 403, str(code))
 
         # --- 9. audit chain integrity (tamper test last) -------------------
         _, verify = api("GET", "/api/audit/verify", token=self.token)

@@ -39,6 +39,7 @@
       <button class="nav-item" data-page="ingest">Device ingest</button>
       <button class="nav-item" data-page="anomalies">Anomalies</button>
       <button class="nav-item" data-page="reconciliation">Reconciliation</button>
+      <button class="nav-item" data-page="reports">Reports</button>
       <button class="nav-item" data-page="admin">Manage</button>
       <button class="nav-item" data-page="audit">Audit trail</button>
     </nav>
@@ -113,6 +114,14 @@
 
       <div class="panel">
         <div class="panel-head">
+          <h3>Fleet collections today</h3>
+          <button class="btn ghost small" id="ov-refresh">Refresh</button>
+        </div>
+        <div class="table-wrap"><table id="fleet-table"></table></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
           <h3>Recent anomalies</h3>
           <button class="btn ghost small" data-goto="anomalies">View all</button>
         </div>
@@ -123,8 +132,8 @@
     <!-- TRANSACTIONS -->
     <section id="page-transactions" class="page hidden">
       <div id="record-panel" class="panel">
-        <div class="panel-head"><h3>Manual fare entry (exception)</h3></div>
-        <p class="muted small">Device and CSV ingestion is the primary record source. Use manual entry only to add or correct an exceptional record.</p>
+        <div class="panel-head"><h3>Record a fare</h3></div>
+        <p class="muted small">Record a fare collected on a trip. Device and CSV ingestion remain available for synced records.</p>
         <form id="record-form" class="form-grid">
           <label>Vehicle <select id="rf-vehicle" required></select></label>
           <label>Route <select id="rf-route" required></select></label>
@@ -231,6 +240,54 @@ CSV-002,2,Kahawa West,1,70,CASH,2026-11-09T08:10:00</textarea>
       <div class="panel">
         <div class="panel-head"><h3>Reconciliation history</h3></div>
         <div class="table-wrap"><table id="recon-table"></table></div>
+      </div>
+    </section>
+
+    <!-- REPORTS -->
+    <section id="page-reports" class="page hidden">
+      <div class="panel">
+        <div class="panel-head">
+          <h3>Daily sales &amp; performance</h3>
+          <div class="filters">
+            <input id="report-day" type="date">
+            <button class="btn primary small" id="report-run">Run report</button>
+            <button class="btn ghost small" id="report-export">Export CSV</button>
+          </div>
+        </div>
+        <div class="cards">
+          <div class="card">
+            <span class="card-label">Transactions</span>
+            <div id="rep-count" class="stat">—</div>
+          </div>
+          <div class="card">
+            <span class="card-label">Total collected</span>
+            <div id="rep-total" class="stat">—</div>
+          </div>
+          <div class="card">
+            <span class="card-label">Flagged</span>
+            <div id="rep-flagged" class="stat">—</div>
+          </div>
+          <div class="card">
+            <span class="card-label">Reversed</span>
+            <div id="rep-reversed" class="stat">—</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid two">
+        <div class="panel">
+          <div class="panel-head"><h3>Collections by vehicle</h3></div>
+          <div class="table-wrap"><table id="rep-vehicle-table"></table></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>Collections by route</h3></div>
+          <div class="table-wrap"><table id="rep-route-table"></table></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h3>Collections by conductor</h3></div>
+        <div class="table-wrap"><table id="rep-conductor-table"></table></div>
       </div>
     </section>
 

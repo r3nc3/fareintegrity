@@ -32,7 +32,7 @@ Demo accounts:
 |---|---|---|
 | platform@fareguard.demo | Platform operator (all SACCOs) | admin1234 |
 | admin@kiambu.demo | SACCO admin | sacco1234 |
-| con@kiambu.demo | Conductor (trip view, shift close) | con12345 |
+| con@kiambu.demo | Conductor (record fares, own history) | con12345 |
 | auditor@kiambu.demo | Auditor (read-only) | audit1234 |
 
 The demo database is seeded with planted integrity failures: a duplicate charge,
@@ -55,11 +55,12 @@ Self-test suite (spawns its own server on port 8032 and exits):
    (`POST /api/ingest/batch`, `POST /api/ingest/csv`). This is the primary record
    source. Sequence gaps, duplicate references, duplicate receipts and fare
    deviations are detected automatically.
-2. **Record an exceptional fare manually** (`POST /api/transactions`, admins
-   only) when a device record is missing or needs correction — vehicle, route,
-   stage, passengers, tender. The amount must equal `stage fare x passengers`;
-   passenger count cannot exceed vehicle capacity; future timestamps are
-   rejected. Conductors do not record fares.
+2. **Record a fare** (`POST /api/transactions`) from the trip screen — vehicle,
+   route, stage, passengers, tender. Conductors can record their own fares and
+   see only their own transaction history; admins can record on any trip.
+   Device/CSV ingestion remains admin-only for synced records. The amount must
+   equal `stage fare x passengers`; passenger count cannot exceed vehicle
+   capacity; future timestamps are rejected.
 3. **Reconcile** a day (`POST /api/reconcile/run`): cash declared vs recorded per
    closed shift, device sequence gaps, duplicate fingerprints, amount mismatches
    and orphan records. Produces an integrity score.
@@ -70,8 +71,9 @@ Self-test suite (spawns its own server on port 8032 and exits):
 ## Key API surface
 
 - `POST /api/auth/login` — JWT (PBKDF2-hashed passwords, HS256)
-- `POST /api/transactions` (manual entry, admins only), `GET /api/transactions`, `POST /api/transactions/{id}/reverse`
-- `POST /api/ingest/batch`, `POST /api/ingest/csv`, `GET /api/ingest/batches`
+- `POST /api/transactions` (conductors record their own; admins any trip), `GET /api/transactions` (conductors see only their own), `GET /api/transactions/{id}`, `POST /api/transactions/{id}/reverse`
+- `POST /api/ingest/batch`, `POST /api/ingest/csv`, `GET /api/ingest/batches` (admins only)
+- `GET /api/reports/sales`, `GET /api/export/sales.csv` — daily collections by vehicle, route and conductor
 - `POST /api/shifts/open`, `POST /api/shifts/{id}/close`, `GET /api/shifts`
 - `POST /api/reconcile/run`, `GET /api/reconcile/runs`
 - `GET /api/flags`, `GET /api/flags/summary`, `POST /api/flags/{id}/resolve`
