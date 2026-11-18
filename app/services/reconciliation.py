@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from .. import integrity
 from ..audit import log_audit
 from ..models import (
+    DailyTarget,
     FareTransaction,
     IntegrityFlag,
     ReconciliationRun,
@@ -50,15 +51,16 @@ def run_reconciliation(db: Session, tenant: Tenant, day: datetime, *,
         if tx.stage_id not in stage_cache:
             stage_cache[tx.stage_id] = db.get(Stage, tx.stage_id)
         stage = stage_cache[tx.stage_id]
-        if stage:
+        if stage and tx.source != "WEB":
             expected = stage.fare_cents * tx.passenger_count
             if tx.amount_cents != expected:
                 integrity.raise_flag(
                     db, tenant_id=tenant.id, kind="AMOUNT_MISMATCH",
                     severity="HIGH", dedupe_key=f"amt:{tenant.id}:{tx.id}",
                     detail=(
-                        f"Ticket {tx.external_ref}: amount {tx.amount_cents} cents "
-                        f"does not equal expected fare {expected} cents."
+                        f"Ticket {tx.external_ref}: amount "
+                        f"{integrity.format_kes(tx.amount_cents)} does not equal "
+                        f"expected fare {integrity.format_kes(expected)}."
                     ),
                     transaction_id=tx.id, vehicle_id=tx.vehicle_id,
                 )
@@ -118,11 +120,34 @@ def run_reconciliation(db: Session, tenant: Tenant, day: datetime, *,
                 dedupe_key=f"cash:{tenant.id}:{shift.id}",
                 detail=(
                     f"Shift {shift.id} (vehicle {shift.vehicle_id}): declared "
-                    f"{declared} cents vs recorded {recorded} cents; difference "
-                    f"{difference} cents."
+                    f"{integrity.format_kes(declared)} vs recorded "
+                    f"{integrity.format_kes(recorded)}; difference "
+                    f"{integrity.format_kes(difference)}."
                 ),
                 shift_id=shift.id, vehicle_id=shift.vehicle_id,
             )
+
+    target_mismatches = (
+        db.query(DailyTarget)
+        .filter(
+            DailyTarget.tenant_id == tenant.id,
+            DailyTarget.day == start.date(),
+            DailyTarget.handed_over_cents.isnot(None),
+            DailyTarget.status != "MET",
+        )
+        .count()
+    )
+
+    declaration_mismatches = (
+        db.query(DailyTarget)
+        .filter(
+            DailyTarget.tenant_id == tenant.id,
+            DailyTarget.day == start.date(),
+            DailyTarget.handed_over_cents.isnot(None),
+        )
+        .filter(DailyTarget.handed_over_cents != DailyTarget.declared_cents)
+        .count()
+    )
 
     open_flags = (
         db.query(IntegrityFlag)
@@ -142,6 +167,8 @@ def run_reconciliation(db: Session, tenant: Tenant, day: datetime, *,
         "device_gaps": {d: seqs for d, seqs in gaps.items() if seqs},
         "duplicate_groups": duplicate_groups,
         "cash_mismatches": cash_mismatches,
+        "target_mismatches": target_mismatches,
+        "declaration_mismatches": declaration_mismatches,
         "open_flags": len(open_flags),
     }
     score = integrity.compute_integrity_score(db, tenant.id)

@@ -1,8 +1,9 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy import (
     Boolean,
     Column,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -64,6 +65,9 @@ class Vehicle(Base):
     capacity = Column(Integer, default=14)
     device_id = Column(String(80), nullable=True)  # fare device / POS terminal id
     active = Column(Boolean, default=True)
+    daily_target_cents = Column(Integer, nullable=True)
+    target_updated_at = Column(DateTime, nullable=True)
+    target_updated_by = Column(Integer, ForeignKey("users.id"), nullable=True)
 
 
 class Route(Base):
@@ -117,10 +121,12 @@ class FareTransaction(Base):
         Index(
             "uq_tx_device_seq", "tenant_id", "device_id", "device_seq",
             unique=True, sqlite_where=text("device_seq IS NOT NULL"),
+            postgresql_where=text("device_seq IS NOT NULL"),
         ),
         Index(
             "uq_tx_provider_receipt", "tenant_id", "provider_receipt",
             unique=True, sqlite_where=text("provider_receipt IS NOT NULL"),
+            postgresql_where=text("provider_receipt IS NOT NULL"),
         ),
         Index("ix_tx_tenant_occurred", "tenant_id", "occurred_at"),
         Index("ix_tx_tenant_status", "tenant_id", "status"),
@@ -162,6 +168,30 @@ class FareTransaction(Base):
     created_at = Column(DateTime, default=utcnow)
 
     shift = relationship("Shift", back_populates="transactions")
+
+
+class DailyTarget(Base):
+    __tablename__ = "daily_targets"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "vehicle_id", "day",
+                         name="uq_daily_target_vehicle_day"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=False)
+    vehicle_id = Column(Integer, ForeignKey("vehicles.id"), nullable=False)
+    day = Column(Date, nullable=False)
+    target_cents = Column(Integer, nullable=False)
+    declared_cents = Column(Integer, nullable=True)
+    handed_over_cents = Column(Integer, nullable=True)
+    status = Column(String(12), nullable=False, default="PENDING")
+    note = Column(String(300), nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=utcnow)
+    declared_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    declared_at = Column(DateTime, nullable=True)
+    handed_over_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    handed_over_at = Column(DateTime, nullable=True)
 
 
 class IntegrityFlag(Base):

@@ -6,7 +6,7 @@ import io
 import json
 import secrets
 import string
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -27,6 +27,17 @@ METHODS = ("CASH", "MPESA", "CARD")
 SOURCES = ("WEB", "DEVICE", "CSV", "API")
 FINGERPRINT_WINDOW = timedelta(minutes=5)
 MAX_CLOCK_SKEW = timedelta(minutes=5)
+
+
+def format_kes(cents: int) -> str:
+    return f"KES {cents / 100:,.2f}"
+
+
+def as_utc_naive(value: datetime) -> datetime:
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
 
 SEVERITY_PENALTY = {"HIGH": 8, "MEDIUM": 3, "LOW": 1}
 
@@ -134,6 +145,8 @@ def record_transaction(db: Session, *, tenant_id: int, source: str = "WEB",
     if route is None or route.tenant_id != tenant_id or stage.route_id != route_id:
         raise FareValidationError("Stage does not belong to the selected route")
 
+    if amount_cents <= 0:
+        raise FareValidationError("amount_cents must be greater than 0")
     if passenger_count < 1:
         raise FareValidationError("passenger_count must be at least 1")
     if passenger_count > vehicle.capacity:
@@ -141,15 +154,16 @@ def record_transaction(db: Session, *, tenant_id: int, source: str = "WEB",
             f"passenger_count {passenger_count} exceeds vehicle capacity {vehicle.capacity}"
         )
 
-    occurred_at = occurred_at or utcnow()
+    occurred_at = as_utc_naive(occurred_at or utcnow())
     if occurred_at > utcnow() + MAX_CLOCK_SKEW:
         raise FareValidationError("occurred_at is in the future (clock skew rejected)")
 
     expected = stage.fare_cents * passenger_count
     if strict_fare and amount_cents != expected:
         raise FareValidationError(
-            f"Fare validation failed: expected {expected} cents for "
-            f"{passenger_count} passenger(s) at {stage.name}, got {amount_cents}"
+            f"Fare validation failed: expected {format_kes(expected)} for "
+            f"{passenger_count} passenger(s) at {stage.name}, "
+            f"got {format_kes(amount_cents)}"
         )
 
     idempotency_key = idempotency_key or _rand("IDEM")
@@ -250,8 +264,9 @@ def record_transaction(db: Session, *, tenant_id: int, source: str = "WEB",
             db, tenant_id=tenant_id, kind="AMOUNT_MISMATCH", severity="HIGH",
             dedupe_key=f"amt:{tenant_id}:{tx.id}",
             detail=(
-                f"Amount {amount_cents} cents does not equal expected fare "
-                f"{expected} cents ({passenger_count} x {stage.fare_cents})."
+                f"Amount {format_kes(amount_cents)} does not equal expected "
+                f"fare {format_kes(expected)} ({passenger_count} x "
+                f"{format_kes(stage.fare_cents)})."
             ),
             transaction_id=tx.id, vehicle_id=vehicle_id,
         )
@@ -260,7 +275,7 @@ def record_transaction(db: Session, *, tenant_id: int, source: str = "WEB",
         db, tenant_id=tenant_id, actor_id=conductor_id,
         action="TRANSACTION_RECORDED", entity="transaction", entity_id=tx.id,
         summary=(
-            f"{source} {method} {amount_cents} cents, ticket {external_ref}, "
+            f"{source} {method} {format_kes(amount_cents)}, ticket {external_ref}, "
             f"vehicle {vehicle_id}, stage {stage.name}"
         ),
         details={
@@ -388,8 +403,8 @@ def normalize_record(db: Session, tenant_id: int, raw: dict, *,
     occurred = _pick(raw, "occurred_at", "timestamp", "time")
     if isinstance(occurred, str):
         try:
-            occurred = datetime.fromisoformat(occurred.replace("Z", "+00:00"))
-            occurred = occurred.replace(tzinfo=None)
+            occurred = as_utc_naive(
+                datetime.fromisoformat(occurred.replace("Z", "+00:00")))
         except ValueError as exc:
             raise IngestError(f"Invalid occurred_at value {occurred!r}") from exc
     elif occurred is None:

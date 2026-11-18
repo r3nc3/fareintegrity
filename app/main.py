@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import re
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -10,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 
 from . import integrity
@@ -17,6 +19,7 @@ from .audit import log_audit, verify_chain
 from .db import Base, engine, get_db
 from .models import (
     AuditLog,
+    DailyTarget,
     FareTransaction,
     IngestBatch,
     IntegrityFlag,
@@ -48,11 +51,63 @@ ROOT = Path(__file__).resolve().parent.parent
 DASHBOARD_DIR = ROOT / "dashboard"
 
 
-@asynccontextmanager
-async def lifespan(app):
+def _ensure_target_schema():
+    with engine.connect() as conn:
+        daily_columns = {
+            column["name"] for column in inspect(conn).get_columns("daily_targets")
+        }
+        for name, ddl in (
+            ("declared_cents", "INTEGER"),
+            ("declared_by", "INTEGER"),
+            ("declared_at", "DATETIME"),
+        ):
+            if name not in daily_columns:
+                conn.execute(text(f"ALTER TABLE daily_targets ADD COLUMN {name} {ddl}"))
+        vehicle_columns = {
+            column["name"] for column in inspect(conn).get_columns("vehicles")
+        }
+        for name, ddl in (
+            ("daily_target_cents", "INTEGER"),
+            ("target_updated_at", "DATETIME"),
+            ("target_updated_by", "INTEGER"),
+        ):
+            if name not in vehicle_columns:
+                conn.execute(text(f"ALTER TABLE vehicles ADD COLUMN {name} {ddl}"))
+        conn.commit()
+
+    with Session(engine) as db:
+        vehicles = (
+            db.query(Vehicle)
+            .filter(Vehicle.daily_target_cents.is_(None))
+            .all()
+        )
+        for vehicle in vehicles:
+            latest = (
+                db.query(DailyTarget)
+                .filter(
+                    DailyTarget.tenant_id == vehicle.tenant_id,
+                    DailyTarget.vehicle_id == vehicle.id,
+                )
+                .order_by(DailyTarget.day.desc(), DailyTarget.id.desc())
+                .first()
+            )
+            if latest is not None:
+                vehicle.daily_target_cents = latest.target_cents
+                vehicle.target_updated_at = latest.created_at or utcnow()
+                vehicle.target_updated_by = latest.created_by
+        db.commit()
+
+
+def initialize_database():
     Base.metadata.create_all(bind=engine)
+    _ensure_target_schema()
     with Session(engine) as db:
         seed_db(db)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    initialize_database()
     yield
 
 
@@ -96,6 +151,19 @@ def _tx_json(t: FareTransaction) -> dict:
     }
 
 
+_CENTS_TEXT = re.compile(r"(\d+) cents")
+_STAGE_FARE_TEXT = re.compile(r"\((\d+) x (\d+)\)")
+
+
+def _flag_detail(detail: str | None) -> str | None:
+    if not detail:
+        return detail
+    detail = _CENTS_TEXT.sub(
+        lambda m: f"KES {int(m.group(1)) / 100:,.2f}", detail)
+    return _STAGE_FARE_TEXT.sub(
+        lambda m: f"({m.group(1)} x KES {int(m.group(2)) / 100:,.2f})", detail)
+
+
 def _flag_json(f: IntegrityFlag) -> dict:
     return {
         "id": f.id,
@@ -107,7 +175,7 @@ def _flag_json(f: IntegrityFlag) -> dict:
         "device_id": f.device_id,
         "vehicle_id": f.vehicle_id,
         "sequence_no": f.sequence_no,
-        "detail": f.detail,
+        "detail": _flag_detail(f.detail),
         "status": f.status,
         "detected_at": f.detected_at.isoformat() if f.detected_at else None,
         "resolved_at": f.resolved_at.isoformat() if f.resolved_at else None,
@@ -225,11 +293,7 @@ def list_vehicles(tenant_id: int | None = Query(None),
     query = db.query(Vehicle)
     if tid is not None:
         query = query.filter(Vehicle.tenant_id == tid)
-    return [
-        {"id": v.id, "tenant_id": v.tenant_id, "reg_no": v.reg_no,
-         "capacity": v.capacity, "device_id": v.device_id, "active": v.active}
-        for v in query.all()
-    ]
+    return [_vehicle_json(v) for v in query.all()]
 
 
 @app.get("/api/routes")
@@ -277,6 +341,14 @@ def _vehicle_json(v: Vehicle) -> dict:
     return {
         "id": v.id, "tenant_id": v.tenant_id, "reg_no": v.reg_no,
         "capacity": v.capacity, "device_id": v.device_id, "active": v.active,
+        "daily_target_cents": v.daily_target_cents,
+        "daily_target_kes": (
+            v.daily_target_cents / 100
+            if v.daily_target_cents is not None else None
+        ),
+        "target_updated_at": (
+            v.target_updated_at.isoformat() if v.target_updated_at else None
+        ),
     }
 
 
@@ -654,8 +726,7 @@ class TransactionCreate(BaseModel):
     stage_id: int
     shift_id: int | None = None
     conductor_id: int | None = None
-    passenger_count: int = Field(default=1, ge=1)
-    amount_cents: int = Field(ge=0)
+    amount_cents: int = Field(gt=0)
     method: str = "CASH"
     occurred_at: datetime | None = None
     external_ref: str | None = None
@@ -680,11 +751,11 @@ def create_transaction(body: TransactionCreate, db: Session = Depends(get_db),
         db, tenant_id=tid, source="WEB", vehicle_id=body.vehicle_id,
         route_id=body.route_id, stage_id=body.stage_id,
         conductor_id=conductor_id, shift_id=body.shift_id,
-        passenger_count=body.passenger_count, amount_cents=body.amount_cents,
+        passenger_count=1, amount_cents=body.amount_cents,
         method=body.method, occurred_at=body.occurred_at,
         external_ref=body.external_ref, idempotency_key=body.idempotency_key,
         provider_receipt=body.provider_receipt, device_id=body.device_id,
-        device_seq=body.device_seq,
+        device_seq=body.device_seq, strict_fare=False,
     )
     db.commit()
     db.refresh(tx)
@@ -1001,7 +1072,7 @@ class CloseShiftBody(BaseModel):
 def close_shift(shift_id: int, body: CloseShiftBody,
                 db: Session = Depends(get_db),
                 user: User = Depends(require_roles(
-                    ROLE_PLATFORM, ROLE_SACCO, ROLE_CONDUCTOR))):
+                    ROLE_PLATFORM, ROLE_SACCO))):
     shift = db.get(Shift, shift_id)
     if shift is None:
         raise HTTPException(404, "Shift not found")
@@ -1034,6 +1105,363 @@ def close_shift(shift_id: int, body: CloseShiftBody,
         "id": shift.id, "status": "CLOSED",
         "recorded_cash_cents": recorded, "difference_cents": difference,
     }
+
+
+# ---------- daily vehicle targets ----------
+
+def _target_json(t: DailyTarget, reg_no: str, current_cents: int | None) -> dict:
+    return {
+        "id": t.id,
+        "tenant_id": t.tenant_id,
+        "vehicle_id": t.vehicle_id,
+        "reg_no": reg_no,
+        "day": t.day.isoformat(),
+        "current_target_cents": current_cents,
+        "target_cents": t.target_cents,
+        "target_kes": t.target_cents / 100,
+        "declared_cents": t.declared_cents,
+        "declared_kes": (
+            t.declared_cents / 100 if t.declared_cents is not None else None
+        ),
+        "declared_by": t.declared_by,
+        "declared_at": t.declared_at.isoformat() if t.declared_at else None,
+        "declaration_matched": (
+            t.declared_cents == t.handed_over_cents
+            if t.declared_cents is not None
+            and t.handed_over_cents is not None
+            else None
+        ),
+        "handed_over_cents": t.handed_over_cents,
+        "handed_over_kes": (
+            t.handed_over_cents / 100 if t.handed_over_cents is not None else None
+        ),
+        "difference_cents": (
+            t.handed_over_cents - t.target_cents
+            if t.handed_over_cents is not None else None
+        ),
+        "status": t.status,
+        "note": t.note,
+        "created_by": t.created_by,
+        "handed_over_by": t.handed_over_by,
+        "handed_over_at": (
+            t.handed_over_at.isoformat() if t.handed_over_at else None
+        ),
+    }
+
+
+def _worked_vehicle_ids(db: Session, user: User, tid: int) -> set[int]:
+    tx = db.query(FareTransaction.vehicle_id).filter(
+        FareTransaction.tenant_id == tid,
+        FareTransaction.conductor_id == user.id,
+    )
+    shifts = db.query(Shift.vehicle_id).filter(
+        Shift.tenant_id == tid,
+        Shift.conductor_id == user.id,
+    )
+    return {row[0] for row in tx.all()} | {row[0] for row in shifts.all()}
+
+
+def _worked_vehicle_on_day(db: Session, user: User, tid: int,
+                           vehicle_id: int, day: date) -> bool:
+    start = datetime(day.year, day.month, day.day)
+    end = start + timedelta(days=1)
+    worked = db.query(FareTransaction.id).filter(
+        FareTransaction.tenant_id == tid,
+        FareTransaction.conductor_id == user.id,
+        FareTransaction.vehicle_id == vehicle_id,
+        FareTransaction.occurred_at >= start,
+        FareTransaction.occurred_at < end,
+    ).first()
+    shift = db.query(Shift.id).filter(
+        Shift.tenant_id == tid,
+        Shift.conductor_id == user.id,
+        Shift.vehicle_id == vehicle_id,
+        Shift.opened_at >= start,
+        Shift.opened_at < end,
+    ).first()
+    return worked is not None or shift is not None
+
+
+def _standing_json(vehicle: Vehicle, row: DailyTarget | None, day: date) -> dict:
+    target = row.target_cents if row is not None else vehicle.daily_target_cents
+    return {
+        "vehicle_id": vehicle.id,
+        "reg_no": vehicle.reg_no,
+        "current_target_cents": vehicle.daily_target_cents,
+        "current_target_kes": (
+            vehicle.daily_target_cents / 100
+            if vehicle.daily_target_cents is not None else None
+        ),
+        "target_updated_at": (
+            vehicle.target_updated_at.isoformat()
+            if vehicle.target_updated_at else None
+        ),
+        "day": day.isoformat(),
+        "record_id": row.id if row is not None else None,
+        "target_cents": target,
+        "target_kes": target / 100 if target is not None else None,
+        "declared_cents": row.declared_cents if row is not None else None,
+        "handed_over_cents": row.handed_over_cents if row is not None else None,
+        "difference_cents": (
+            row.handed_over_cents - row.target_cents
+            if row is not None and row.handed_over_cents is not None else None
+        ),
+        "declaration_matched": (
+            row.declared_cents == row.handed_over_cents
+            if row is not None and row.declared_cents is not None
+            and row.handed_over_cents is not None else None
+        ),
+        "status": row.status if row is not None else "PENDING",
+        "note": row.note if row is not None else None,
+    }
+
+
+@app.get("/api/targets")
+def list_targets(day: date | None = Query(None),
+                 tenant_id: int | None = Query(None),
+                 db: Session = Depends(get_db),
+                 user: User = Depends(current_user)):
+    tid = _scope(user, tenant_id)
+    day = day or utcnow().date()
+    vehicles = db.query(Vehicle)
+    if tid is not None:
+        vehicles = vehicles.filter(Vehicle.tenant_id == tid)
+    if user.role == ROLE_CONDUCTOR:
+        vehicles = vehicles.filter(
+            Vehicle.id.in_(_worked_vehicle_ids(db, user, tid)))
+    rows = db.query(DailyTarget).filter(DailyTarget.day == day)
+    if tid is not None:
+        rows = rows.filter(DailyTarget.tenant_id == tid)
+    by_vehicle = {row.vehicle_id: row for row in rows.all()}
+    return [
+        _standing_json(vehicle, by_vehicle.get(vehicle.id), day)
+        for vehicle in vehicles.order_by(Vehicle.reg_no).all()
+    ]
+
+
+class TargetCreate(BaseModel):
+    tenant_id: int | None = None
+    vehicle_id: int
+    target_cents: int = Field(gt=0)
+    note: str | None = None
+
+
+@app.post("/api/targets")
+def set_target(body: TargetCreate, db: Session = Depends(get_db),
+               user: User = Depends(require_roles(*MANAGE_ROLES))):
+    tid = _require_tenant(user, body.tenant_id)
+    vehicle = db.get(Vehicle, body.vehicle_id)
+    if vehicle is None or vehicle.tenant_id != tid:
+        raise HTTPException(404, "Unknown vehicle for this SACCO")
+    previous = vehicle.daily_target_cents
+    vehicle.daily_target_cents = body.target_cents
+    vehicle.target_updated_at = utcnow()
+    vehicle.target_updated_by = user.id
+    db.flush()
+    log_audit(
+        db, tenant_id=tid, actor_id=user.id, actor_email=user.email,
+        action="VEHICLE_TARGET_SET", entity="vehicle", entity_id=vehicle.id,
+        summary=(
+            f"vehicle {vehicle.reg_no}: target "
+            f"{integrity.format_kes(body.target_cents)}"
+            + (
+                f" (was {integrity.format_kes(previous)})"
+                if previous is not None else ""
+            )
+        ),
+        details={
+            "previous_cents": previous,
+            "target_cents": body.target_cents,
+            "note": body.note,
+        },
+    )
+    db.commit()
+    return _standing_json(vehicle, None, utcnow().date())
+
+
+class CollectionCreate(BaseModel):
+    tenant_id: int | None = None
+    vehicle_id: int
+    day: date | None = None
+
+
+@app.post("/api/daily-collections")
+def start_collection(body: CollectionCreate, db: Session = Depends(get_db),
+                     user: User = Depends(current_user)):
+    tid = _require_tenant(user, body.tenant_id)
+    vehicle = db.get(Vehicle, body.vehicle_id)
+    if vehicle is None or vehicle.tenant_id != tid:
+        raise HTTPException(404, "Unknown vehicle for this SACCO")
+    day = body.day or utcnow().date()
+    if user.role == ROLE_CONDUCTOR and not _worked_vehicle_on_day(
+        db, user, tid, vehicle.id, day
+    ):
+        raise HTTPException(403, "You did not work this vehicle on this day")
+    if vehicle.daily_target_cents is None:
+        raise HTTPException(409, "No standing target set for this vehicle")
+    row = db.query(DailyTarget).filter(
+        DailyTarget.tenant_id == tid,
+        DailyTarget.vehicle_id == vehicle.id,
+        DailyTarget.day == day,
+    ).first()
+    if row is None:
+        row = DailyTarget(
+            tenant_id=tid, vehicle_id=vehicle.id, day=day,
+            target_cents=vehicle.daily_target_cents, created_by=user.id,
+        )
+        db.add(row)
+        db.flush()
+        log_audit(
+            db, tenant_id=tid, actor_id=user.id, actor_email=user.email,
+            action="DAILY_COLLECTION_STARTED", entity="daily_target",
+            entity_id=row.id,
+            summary=(
+                f"vehicle {vehicle.reg_no} day {day}: collection opened at "
+                f"{integrity.format_kes(row.target_cents)}"
+            ),
+        )
+        db.commit()
+    return _target_json(row, vehicle.reg_no, vehicle.daily_target_cents)
+
+
+class DeclarationBody(BaseModel):
+    tenant_id: int | None = None
+    declared_cents: int = Field(ge=0)
+    note: str | None = None
+
+
+@app.post("/api/targets/{target_id}/declare")
+def declare_cash(target_id: int, body: DeclarationBody,
+                 db: Session = Depends(get_db),
+                 user: User = Depends(require_roles(ROLE_CONDUCTOR))):
+    tid = _require_tenant(user, body.tenant_id)
+    target = db.get(DailyTarget, target_id)
+    if target is None or target.tenant_id != tid:
+        raise HTTPException(404, "Unknown daily target")
+    if target.declared_cents is not None:
+        raise HTTPException(409, "Declaration already logged for this target")
+    if target.handed_over_cents is not None:
+        raise HTTPException(409, "Handover already logged for this target")
+
+    if not _worked_vehicle_on_day(db, user, tid, target.vehicle_id, target.day):
+        raise HTTPException(403, "You did not work this vehicle on this day")
+
+    target.declared_cents = body.declared_cents
+    target.declared_by = user.id
+    target.declared_at = utcnow()
+    if body.note:
+        target.note = body.note
+    db.flush()
+
+    vehicle = db.get(Vehicle, target.vehicle_id)
+    reg_no = vehicle.reg_no if vehicle else str(target.vehicle_id)
+    current = vehicle.daily_target_cents if vehicle else None
+    log_audit(
+        db, tenant_id=tid, actor_id=user.id, actor_email=user.email,
+        action="CASH_DECLARED", entity="daily_target", entity_id=target.id,
+        summary=(
+            f"vehicle {reg_no} day {target.day}: conductor declared "
+            f"{integrity.format_kes(body.declared_cents)}"
+        ),
+        details={
+            "declared_cents": body.declared_cents,
+            "target_cents": target.target_cents,
+        },
+    )
+    db.commit()
+    return _target_json(target, reg_no, current)
+
+
+class HandoverBody(BaseModel):
+    tenant_id: int | None = None
+    handed_over_cents: int = Field(ge=0)
+    note: str | None = None
+
+
+@app.post("/api/targets/{target_id}/handover")
+def log_handover(target_id: int, body: HandoverBody,
+                 db: Session = Depends(get_db),
+                 user: User = Depends(require_roles(*MANAGE_ROLES))):
+    tid = _require_tenant(user, body.tenant_id)
+    target = db.get(DailyTarget, target_id)
+    if target is None or target.tenant_id != tid:
+        raise HTTPException(404, "Unknown daily target")
+    if target.handed_over_cents is not None:
+        raise HTTPException(409, "Handover already logged for this target")
+    if target.declared_cents is None:
+        raise HTTPException(409, "Conductor has not declared an amount yet")
+
+    difference = body.handed_over_cents - target.target_cents
+    target.handed_over_cents = body.handed_over_cents
+    target.handed_over_by = user.id
+    target.handed_over_at = utcnow()
+    target.status = (
+        "MET" if difference == 0 else "SHORT" if difference < 0 else "OVER"
+    )
+    if body.note:
+        target.note = body.note
+    db.flush()
+
+    vehicle = db.get(Vehicle, target.vehicle_id)
+    reg_no = vehicle.reg_no if vehicle else str(target.vehicle_id)
+    current = vehicle.daily_target_cents if vehicle else None
+    if difference != 0:
+        integrity.raise_flag(
+            db, tenant_id=tid, kind="TARGET_MISMATCH",
+            severity="HIGH" if difference < 0 and abs(difference) > 2000 else "MEDIUM",
+            dedupe_key=f"target:{tid}:{target.id}",
+            detail=(
+                f"Vehicle {reg_no} day {target.day}: target "
+                f"{integrity.format_kes(target.target_cents)}, handed over "
+                f"{integrity.format_kes(body.handed_over_cents)}; "
+                f"{'short by' if difference < 0 else 'over by'} "
+                f"{integrity.format_kes(abs(difference))}."
+            ),
+            vehicle_id=target.vehicle_id,
+        )
+
+    declaration_gap = body.handed_over_cents - target.declared_cents
+    if declaration_gap != 0:
+        integrity.raise_flag(
+            db, tenant_id=tid, kind="DECLARATION_MISMATCH",
+            severity=(
+                "HIGH"
+                if declaration_gap < 0 and abs(declaration_gap) > 2000
+                else "MEDIUM"
+            ),
+            dedupe_key=f"declare:{tid}:{target.id}",
+            detail=(
+                f"Vehicle {reg_no} day {target.day}: conductor declared "
+                f"{integrity.format_kes(target.declared_cents)}, but "
+                f"{integrity.format_kes(body.handed_over_cents)} was counted; "
+                f"{'short by' if declaration_gap < 0 else 'over by'} "
+                f"{integrity.format_kes(abs(declaration_gap))} versus declaration."
+            ),
+            vehicle_id=target.vehicle_id,
+        )
+
+    log_audit(
+        db, tenant_id=tid, actor_id=user.id, actor_email=user.email,
+        action="CASH_HANDOVER_LOGGED", entity="daily_target",
+        entity_id=target.id,
+        summary=(
+            f"vehicle {reg_no} day {target.day}: handed over "
+            f"{integrity.format_kes(body.handed_over_cents)}, "
+            f"target {integrity.format_kes(target.target_cents)}, "
+            f"difference {integrity.format_kes(difference)}"
+        ),
+        details={
+            "target_cents": target.target_cents,
+            "declared_cents": target.declared_cents,
+            "handed_over_cents": body.handed_over_cents,
+            "difference_cents": difference,
+            "declaration_gap_cents": declaration_gap,
+            "declaration_matched": declaration_gap == 0,
+            "status": target.status,
+        },
+    )
+    db.commit()
+    return _target_json(target, reg_no, current)
 
 
 # ---------- reconciliation ----------
@@ -1085,15 +1513,28 @@ def list_reconcile_runs(tenant_id: int | None = Query(None),
 
 
 @app.get("/api/dashboard/stats")
-def dashboard_stats(tenant_id: int | None = Query(None),
+def dashboard_stats(day: date | None = Query(None),
+                    tenant_id: int | None = Query(None),
                     db: Session = Depends(get_db),
                     user: User = Depends(current_user)):
     tid = _scope(user, tenant_id)
-    today = utcnow().date()
-    start = datetime(today.year, today.month, today.day)
+    if day is None:
+        latest_query = db.query(FareTransaction).filter(
+            FareTransaction.status != "REVERSED",
+        )
+        if tid is not None:
+            latest_query = latest_query.filter(FareTransaction.tenant_id == tid)
+        if user.role == ROLE_CONDUCTOR:
+            latest_query = latest_query.filter(
+                FareTransaction.conductor_id == user.id)
+        latest = latest_query.order_by(FareTransaction.occurred_at.desc()).first()
+        day = latest.occurred_at.date() if latest else utcnow().date()
+    start = datetime(day.year, day.month, day.day)
+    end = start + timedelta(days=1)
 
     query = db.query(FareTransaction).filter(
         FareTransaction.occurred_at >= start,
+        FareTransaction.occurred_at < end,
         FareTransaction.status != "REVERSED",
     )
     if tid is not None:
@@ -1126,7 +1567,7 @@ def dashboard_stats(tenant_id: int | None = Query(None),
 
     by_kind = summary["by_kind"]
     return {
-        "date": today.isoformat(),
+        "date": day.isoformat(),
         "transactions_today": len(txs),
         "total_amount_cents": sum(t.amount_cents for t in txs),
         "by_method": by_method,
@@ -1342,7 +1783,7 @@ def export_flags(tenant_id: int | None = Query(None),
         f.device_id, f.vehicle_id, f.sequence_no, f.status,
         f.detected_at.isoformat() if f.detected_at else "",
         f.resolved_at.isoformat() if f.resolved_at else "",
-        f.detail,
+        _flag_detail(f.detail),
     ] for f in rows]
     return _csv_response(data, header, "integrity_flags.csv")
 
@@ -1351,7 +1792,10 @@ def export_flags(tenant_id: int | None = Query(None),
 
 @app.get("/")
 def serve_index():
-    return FileResponse(DASHBOARD_DIR / "index.html")
+    return FileResponse(
+        DASHBOARD_DIR / "index.html",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 app.mount("/static", StaticFiles(directory=DASHBOARD_DIR), name="static")

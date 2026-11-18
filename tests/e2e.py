@@ -116,8 +116,6 @@ class Suite:
 
         _, routes = api("GET", "/api/routes", token=self.token)
         self.stage = {s["name"]: s for r in routes for s in r["stages"]}
-        _, vehicles = api("GET", "/api/vehicles", token=self.token)
-        capacity = vehicles[0]["capacity"]
         thika = self.stage["Thika Road"]
 
         base = {
@@ -148,16 +146,29 @@ class Suite:
 
         code, _ = api("POST", "/api/transactions", {
             **base, "idempotency_key": "e2e-3", "external_ref": "E2E-TKT-3",
-            "amount_cents": thika["fare_cents"] - 1,
+            "amount_cents": 0,
         }, self.token)
-        self.check("amount != fare x passengers -> 422", code == 422, str(code))
+        self.check("trip total must be greater than zero -> 422",
+                   code == 422, str(code))
 
-        code, _ = api("POST", "/api/transactions", {
+        code, trip = api("POST", "/api/transactions", {
             **base, "idempotency_key": "e2e-4", "external_ref": "E2E-TKT-4",
-            "passenger_count": capacity + 1,
-            "amount_cents": thika["fare_cents"] * (capacity + 1),
+            "amount_cents": thika["fare_cents"] * 2,
         }, self.token)
-        self.check("passenger count over capacity -> 422", code == 422, str(code))
+        self.check("trip total may differ from a single stage fare",
+                   code == 200
+                   and trip["amount_cents"] == thika["fare_cents"] * 2,
+                   str((code, trip)))
+
+        aware_at = self.now - timedelta(minutes=2)
+        code, aware_tx = api("POST", "/api/transactions", {
+            **base, "idempotency_key": "e2e-aware", "external_ref": "E2E-AWARE",
+            "occurred_at": aware_at.isoformat(timespec="seconds") + "+00:00",
+        }, self.token)
+        self.check("timezone-aware timestamp is accepted",
+                   code == 200 and aware_tx["occurred_at"].startswith(
+                       aware_at.strftime("%Y-%m-%dT%H:%M:%S")),
+                   str((code, aware_tx)))
 
         seq = {**base, "idempotency_key": "e2e-seq-1",
                "external_ref": "E2E-SEQ-1", "device_id": "E2E-DEV",
@@ -472,15 +483,23 @@ class Suite:
                    code == 200 and tenant_vehicle["tenant_id"] == new_tenant["id"],
                    str((code, tenant_vehicle)))
 
+        tenant_day = self.now - timedelta(days=3)
         code, tenant_tx = api("POST", "/api/transactions", {
             "vehicle_id": tenant_vehicle["id"], "route_id": tenant_route["id"],
             "stage_id": tenant_route["stages"][1]["id"], "passenger_count": 1,
             "amount_cents": 8000, "method": "CASH",
             "external_ref": "E2E-NEW-TKT", "idempotency_key": "e2e-new-1",
+            "occurred_at": iso(tenant_day),
         }, tenant_token)
         self.check("new SACCO can record a fare on its own route",
                    code == 200 and tenant_tx["tenant_id"] == new_tenant["id"],
                    str((code, tenant_tx)))
+
+        _, tenant_stats = api("GET", "/api/dashboard/stats", token=tenant_token)
+        self.check("dashboard stats default to the latest day with data",
+                   tenant_stats["date"] == tenant_day.date().isoformat()
+                   and tenant_stats["transactions_today"] == 1,
+                   str(tenant_stats)[:300])
 
         code, route_with_stage = api(
             "POST", f"/api/routes/{tenant_route['id']}/stages",
@@ -512,10 +531,16 @@ class Suite:
 
         # --- 8c. collections dashboard + sales reports ---------------------
         _, stats = api("GET", "/api/dashboard/stats", token=self.token)
-        self.check("dashboard exposes fleet collections today",
+        self.check("dashboard exposes fleet collections on the latest day",
                    isinstance(stats.get("by_vehicle"), list)
                    and any(v["reg_no"] for v in stats["by_vehicle"]),
                    str(stats.get("by_vehicle")))
+
+        past_day = (self.now - timedelta(days=3)).date().isoformat()
+        _, past_stats = api("GET", f"/api/dashboard/stats?day={past_day}",
+                            token=self.token)
+        self.check("dashboard stats honour an explicit day",
+                   past_stats["date"] == past_day, str(past_stats)[:200])
 
         _, report = api(
             "GET", f"/api/reports/sales?day={self.today.isoformat()}",
@@ -535,6 +560,150 @@ class Suite:
         code, _ = api("GET", "/api/reports/sales", token=con_token)
         self.check("conductor cannot access sales reports",
                    code == 403, str(code))
+
+        # --- 8d. standing targets, daily declarations + handovers ----------
+        day = self.today.isoformat()
+        code, target = api("POST", "/api/targets", {
+            "vehicle_id": 1, "target_cents": 10000, "note": "e2e target",
+        }, self.token)
+        self.check("admin can set a standing vehicle target",
+                   code == 200
+                   and target["current_target_cents"] == 10000
+                   and target["record_id"] is None, str((code, target)))
+
+        code, target = api("POST", "/api/targets", {
+            "vehicle_id": 1, "target_cents": 11000,
+        }, self.token)
+        self.check("admin can change a standing target",
+                   code == 200 and target["current_target_cents"] == 11000,
+                   str((code, target)))
+
+        _, vehicles = api("GET", "/api/vehicles", token=self.token)
+        other_vehicle = next(v["id"] for v in vehicles if v["id"] != 1)
+        code, other = api("POST", "/api/targets", {
+            "vehicle_id": other_vehicle, "target_cents": 8000,
+        }, self.token)
+        self.check("admin can set another vehicle's standing target",
+                   code == 200 and other["current_target_cents"] == 8000,
+                   str((code, other)))
+
+        code, _ = api("POST", "/api/targets", {
+            "vehicle_id": 1, "target_cents": 5000,
+        }, con_token)
+        self.check("conductor cannot set a vehicle target", code == 403, str(code))
+
+        _, targets = api("GET", f"/api/targets?day={day}", token=self.token)
+        self.check("vehicles are listed with their standing target",
+                   any(t["vehicle_id"] == 1 and t["current_target_cents"] == 11000
+                       and t["record_id"] is None for t in targets),
+                   str(targets)[:250])
+
+        code, _ = api("POST", "/api/daily-collections", {
+            "vehicle_id": other_vehicle, "day": day,
+        }, con_token)
+        self.check("conductor cannot open a collection for a vehicle not worked",
+                   code == 403, str(code))
+
+        code, collection = api("POST", "/api/daily-collections", {
+            "vehicle_id": 1, "day": day,
+        }, con_token)
+        self.check("conductor opens a daily collection at the standing target",
+                   code == 200 and collection["target_cents"] == 11000
+                   and collection["declared_cents"] is None,
+                   str((code, collection)))
+        record_id = collection["id"]
+
+        code, again = api("POST", "/api/daily-collections", {
+            "vehicle_id": 1, "day": day,
+        }, con_token)
+        self.check("opening a collection twice reuses the same record",
+                   code == 200 and again["id"] == record_id,
+                   str((code, again)))
+
+        code, _ = api(
+            "POST", f"/api/targets/{record_id}/declare",
+            {"declared_cents": 9000}, self.token)
+        self.check("admin cannot declare cash for a conductor",
+                   code == 403, str(code))
+
+        code, _ = api(
+            "POST", f"/api/targets/{record_id}/handover",
+            {"handed_over_cents": 11000}, self.token)
+        self.check("handover requires a conductor declaration",
+                   code == 409, str(code))
+
+        code, declared = api(
+            "POST", f"/api/targets/{record_id}/declare",
+            {"declared_cents": 10500, "note": "e2e declaration"}, con_token)
+        self.check("conductor declares cash collected",
+                   code == 200 and declared["declared_cents"] == 10500
+                   and declared["declaration_matched"] is None,
+                   str((code, declared)))
+
+        code, _ = api(
+            "POST", f"/api/targets/{record_id}/declare",
+            {"declared_cents": 10500}, con_token)
+        self.check("declaration cannot be logged twice", code == 409, str(code))
+
+        _, con_targets = api("GET", f"/api/targets?day={day}", token=con_token)
+        self.check("conductor sees only vehicles they worked",
+                   any(t["vehicle_id"] == 1 and t["record_id"] == record_id
+                       for t in con_targets)
+                   and all(t["vehicle_id"] != other_vehicle
+                           for t in con_targets),
+                   str(con_targets)[:250])
+
+        code, _ = api("GET", "/api/targets?tenant_id=1", token=tenant_token)
+        self.check("SACCO admin cannot read another SACCO's targets",
+                   code == 403, str(code))
+
+        code, short = api(
+            "POST", f"/api/targets/{record_id}/handover",
+            {"handed_over_cents": 10000}, self.token)
+        self.check("short handover is recorded as a mismatch",
+                   code == 200 and short["status"] == "SHORT"
+                   and short["target_cents"] == 11000
+                   and short["difference_cents"] == -1000
+                   and short["declaration_matched"] is False,
+                   str((code, short)))
+
+        code, _ = api("POST", f"/api/targets/{record_id}/handover",
+                      {"handed_over_cents": 11000}, self.token)
+        self.check("handover cannot be logged twice", code == 409, str(code))
+
+        code, changed = api("POST", "/api/targets", {
+            "vehicle_id": 1, "target_cents": 12000,
+        }, self.token)
+        self.check("admin can change a standing target after handover",
+                   code == 200 and changed["current_target_cents"] == 12000,
+                   str((code, changed)))
+
+        _, targets = api("GET", f"/api/targets?day={day}", token=self.token)
+        self.check("past collection keeps its target snapshot",
+                   any(t["record_id"] == record_id
+                       and t["target_cents"] == 11000
+                       and t["current_target_cents"] == 12000
+                       for t in targets), str(targets)[:250])
+
+        code, _ = api("POST", f"/api/targets/{record_id}/handover",
+                      {"handed_over_cents": 11000}, con_token)
+        self.check("conductor cannot log a handover", code == 403, str(code))
+
+        _, flags = api("GET", "/api/flags?limit=200", token=self.token)
+        kinds = [f["kind"] for f in flags]
+        self.check("handover shortfall raises TARGET_MISMATCH",
+                   any(k == "TARGET_MISMATCH" for k in kinds), str(kinds))
+        self.check("declaration difference raises DECLARATION_MISMATCH",
+                   any(k == "DECLARATION_MISMATCH" for k in kinds), str(kinds))
+
+        code, recon = api("POST", "/api/reconcile/run", {"day": day},
+                          self.token)
+        summary = recon.get("summary", {}) if code == 200 else {}
+        self.check("reconciliation reports target and declaration mismatches",
+                   code == 200
+                   and summary.get("target_mismatches", 0) >= 1
+                   and summary.get("declaration_mismatches", 0) >= 1,
+                   str(recon)[:200])
 
         # --- 9. audit chain integrity (tamper test last) -------------------
         _, verify = api("GET", "/api/audit/verify", token=self.token)

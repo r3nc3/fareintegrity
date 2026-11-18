@@ -158,6 +158,8 @@ label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color:
 @media (max-width: 760px) {
   .stage-row { grid-template-columns: 1fr; }
 }
+.inline-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.inline-form input { width: auto; min-width: 150px; }
 .filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .filters input, .filters select { width: auto; min-width: 120px; }
 

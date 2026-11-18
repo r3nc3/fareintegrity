@@ -2,3 +2,5 @@ fastapi>=0.115
 uvicorn[standard]>=0.30
 sqlalchemy>=2.0
 pyjwt>=2.8
+mangum>=0.17
+psycopg[binary]>=3.1

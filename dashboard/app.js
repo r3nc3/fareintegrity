@@ -16,7 +16,7 @@ const $$ = (sel) => [...document.querySelectorAll(sel)];
 const PAGE_META = {
   overview: ["Overview", "Live view of fare record integrity"],
   transactions: ["Transactions", "Every fare record, validated and immutable"],
-  ingest: ["Device ingest", "Sync device / CSV records and detect gaps"],
+  targets: ["Daily targets", "Standing vehicle targets and daily collections"],
   anomalies: ["Anomalies", "Duplicates, gaps, mismatches and cash variances"],
   reconciliation: ["Reconciliation", "Shift and period reconciliation runs"],
   reports: ["Reports", "Daily sales and fleet performance"],
@@ -27,6 +27,7 @@ const PAGE_META = {
 const canManage = () =>
   ["SACCO_ADMIN", "PLATFORM_ADMIN"].includes(state.user?.role);
 const isPlatform = () => state.user?.role === "PLATFORM_ADMIN";
+const isConductor = () => state.user?.role === "CONDUCTOR";
 
 /* ---------- utilities ---------- */
 
@@ -208,22 +209,24 @@ function applyRole() {
   $$(".nav-item").forEach((btn) => btn.classList.remove("hidden"));
   $("#record-panel").classList.remove("hidden");
   $("#recon-form")?.closest(".panel")?.classList.remove("hidden");
+  $("#target-form")?.closest(".panel")?.classList.remove("hidden");
   if (role === "AUDITOR") {
-    hide("ingest");
     hide("admin");
     $("#record-panel").classList.add("hidden");
     $("#recon-form")?.closest(".panel")?.classList.add("hidden");
   }
   if (role === "CONDUCTOR") {
     hide("overview");
-    hide("ingest");
     hide("anomalies");
     hide("audit");
     hide("reconciliation");
     hide("reports");
     hide("admin");
   }
-  if (!canManage()) hide("admin");
+  if (!canManage()) {
+    hide("admin");
+    $("#target-form")?.closest(".panel")?.classList.add("hidden");
+  }
 }
 
 /* ---------- masters in forms ---------- */
@@ -232,7 +235,7 @@ function populateMasters() {
   const options = state.vehicles
     .map((v) => `<option value="${v.id}">${esc(v.reg_no)}${v.device_id ? " · " + esc(v.device_id) : ""}</option>`)
     .join("");
-  ["#rf-vehicle", "#ing-vehicle", "#csv-vehicle"].forEach((sel) => {
+  ["#rf-vehicle", "#tg-vehicle"].forEach((sel) => {
     $(sel).innerHTML = options;
   });
 
@@ -240,11 +243,6 @@ function populateMasters() {
     .map((r) => `<option value="${r.id}">${esc(r.name)}</option>`)
     .join("");
   populateStages();
-
-  $("#ing-vehicle").addEventListener("change", () => {
-    const vehicle = state.vehicles.find((v) => String(v.id) === $("#ing-vehicle").value);
-    if (vehicle?.device_id) $("#ing-device").value = vehicle.device_id;
-  });
 }
 
 function populateStages() {
@@ -260,8 +258,7 @@ function populateStages() {
 function updateAmount() {
   const option = $("#rf-stage").selectedOptions[0];
   const fare = option ? Number(option.dataset.fare) : 0;
-  const pax = Math.max(1, Number($("#rf-passengers").value) || 1);
-  $("#rf-amount").value = ((fare * pax) / 100).toFixed(2);
+  $("#rf-amount").value = (fare / 100).toFixed(2);
 }
 
 /* ---------- navigation ---------- */
@@ -283,7 +280,7 @@ function navigate(page) {
   const renderers = {
     overview: renderOverview,
     transactions: renderTransactions,
-    ingest: renderIngest,
+    targets: renderTargets,
     anomalies: renderAnomalies,
     reconciliation: renderReconciliation,
     reports: renderReports,
@@ -297,6 +294,9 @@ function navigate(page) {
 
 async function renderOverview() {
   const stats = await api("GET", scopeParam("/api/dashboard/stats"));
+  const day = stats.date || todayInput();
+  $("#stat-day-label").textContent = `Transactions · ${day}`;
+  $("#fleet-day-label").textContent = `Fleet collections · ${day}`;
   $("#stat-score").textContent = stats.integrity_score;
   $("#stat-score-note").textContent =
     stats.integrity_score >= 80 ? "healthy" : stats.integrity_score >= 50 ? "needs attention" : "critical";
@@ -310,14 +310,14 @@ async function renderOverview() {
   $("#stat-cash").textContent = stats.cash_mismatches;
   renderBars("#severity-bars", stats.by_severity, true);
   renderBars("#kind-bars", stats.by_kind, false);
-  renderFleetTable(stats.by_vehicle || []);
+  renderFleetTable(stats.by_vehicle || [], day);
   renderFlagsTable("#recent-flags-table", stats.recent_flags, false);
 }
 
-function renderFleetTable(rows) {
+function renderFleetTable(rows, day) {
   const el = $("#fleet-table");
   if (!rows.length) {
-    el.innerHTML = `<tbody><tr><td class="empty">No collections today.</td></tr></tbody>`;
+    el.innerHTML = `<tbody><tr><td class="empty">No collections for ${esc(day || "this day")}.</td></tr></tbody>`;
     return;
   }
   const head = `<thead><tr><th>Vehicle</th><th>Trips</th><th>Collected</th></tr></thead>`;
@@ -377,7 +377,7 @@ function renderTxTable(rows) {
       <td>${esc(state.vehicleMap[t.vehicle_id] || t.vehicle_id)}</td>
       <td>${esc(state.stageMap[t.stage_id] || t.stage_id)}</td>
       <td>${esc(t.method)}</td>
-      <td>${t.passenger_count}</td>
+      <td>${t.source === "WEB" ? "—" : t.passenger_count}</td>
       <td>${kes(t.amount_cents)}</td>
       <td class="muted">${esc(t.source)}</td>
       <td><span class="pill ${t.integrity_status}">${t.integrity_status}</span></td>
@@ -396,7 +396,6 @@ async function submitRecord(event) {
     vehicle_id: Number($("#rf-vehicle").value),
     route_id: Number($("#rf-route").value),
     stage_id: Number($("#rf-stage").value),
-    passenger_count: Number($("#rf-passengers").value),
     amount_cents: Math.round(Number($("#rf-amount").value) * 100),
     method: $("#rf-method").value,
     external_ref: $("#rf-ref").value.trim() || undefined,
@@ -426,66 +425,177 @@ async function submitRecord(event) {
   }
 }
 
-/* ---------- ingest ---------- */
+/* ---------- daily targets ---------- */
 
-async function renderIngest() {
-  const batches = await api("GET", scopeParam("/api/ingest/batches"));
-  const el = $("#batch-table");
-  if (!batches.length) {
-    el.innerHTML = `<tbody><tr><td class="empty">No batches ingested yet.</td></tr></tbody>`;
+function renderTargetTable(rows) {
+  const el = $("#target-table");
+  if (!rows.length) {
+    el.innerHTML = `<tbody><tr><td class="empty">No vehicles.</td></tr></tbody>`;
     return;
   }
-  const head = `<thead><tr><th>When</th><th>Source</th><th>Device</th><th>Records</th><th>Accepted</th><th>Duplicates</th><th>Flagged</th><th>Gaps</th></tr></thead>`;
-  const body = batches.map((b) => `<tr>
-    <td class="mono">${fmtDate(b.received_at)}</td>
-    <td>${esc(b.source)}</td>
-    <td class="mono">${esc(b.device_id || "—")}</td>
-    <td>${b.record_count}</td>
-    <td>${b.accepted_count}</td>
-    <td>${b.duplicate_count}</td>
-    <td>${b.flagged_count}</td>
-    <td>${b.gap_count ? `<span class="pill HIGH">${b.gap_count}</span>` : "0"}</td>
-  </tr>`).join("");
+  const head = `<thead><tr>
+    <th>Day</th><th>Vehicle</th><th>Target</th><th>Declared</th>
+    <th>Handed over</th><th>Difference</th><th>Status</th><th>Note</th><th></th>
+  </tr></thead>`;
+  const body = rows.map((t) => {
+    const diff = t.difference_cents;
+    const diffClass = diff === null ? "" : diff < 0 ? "HIGH" : diff > 0 ? "MEDIUM" : "OK";
+    const target = t.target_cents === null
+      ? `<span class="muted">no target set</span>`
+      : `${kes(t.target_cents)}${t.current_target_cents !== null
+          && t.current_target_cents !== t.target_cents
+          ? `<div class="muted small">now ${kes(t.current_target_cents)}</div>` : ""}`;
+    const declared = t.declared_cents === null
+      ? `<span class="muted">awaiting declaration</span>`
+      : `${kes(t.declared_cents)}${t.declaration_matched === false
+          ? ` <span class="pill HIGH">differs</span>` : ""}`;
+    let action = "";
+    if (t.current_target_cents === null) {
+      action = `<span class="muted small">Set a target above</span>`;
+    } else if (isConductor() && t.record_id === null) {
+      action = `<button class="btn primary small" data-start-collection="${t.vehicle_id}">Start declaration</button>`;
+    } else if (isConductor() && t.declared_cents === null) {
+      action = `<button class="btn primary small" data-declare="${t.record_id}">Declare amount</button>`;
+    } else if (canManage() && t.record_id !== null && t.handed_over_cents === null) {
+      action = t.declared_cents === null
+        ? `<span class="muted small">Awaiting declaration</span>`
+        : `<button class="btn ghost small" data-handover="${t.record_id}">Log handover</button>`;
+    }
+    return `<tr>
+      <td class="mono">${esc(t.day)}</td>
+      <td><strong>${esc(t.reg_no)}</strong></td>
+      <td>${target}</td>
+      <td>${declared}</td>
+      <td>${t.handed_over_cents === null ? "—" : kes(t.handed_over_cents)}</td>
+      <td>${diff === null ? "—" : `<span class="pill ${diffClass}">${kes(Math.abs(diff))}</span>`}</td>
+      <td><span class="pill ${esc(t.status)}">${esc(t.status)}</span></td>
+      <td class="muted">${esc(t.note || "")}</td>
+      <td>${action}</td>
+    </tr>`;
+  }).join("");
   el.innerHTML = head + `<tbody>${body}</tbody>`;
 }
 
-async function runBatchIngest() {
-  let records;
+async function renderTargets() {
+  const day = $("#tg-day-filter").value;
+  const rows = await api("GET", scopeParam("/api/targets" + (day ? "?day=" + day : "")));
+  renderTargetTable(rows);
+}
+
+async function submitTarget(event) {
+  event.preventDefault();
+  const resultEl = $("#tg-result");
+  resultEl.textContent = "";
   try {
-    records = JSON.parse($("#ing-json").value);
-    if (!Array.isArray(records)) throw new Error("JSON must be an array");
+    const target = await api("POST", "/api/targets", bodyWithTenant({
+      vehicle_id: Number($("#tg-vehicle").value),
+      target_cents: Math.round(Number($("#tg-target").value) * 100),
+      note: $("#tg-note").value.trim() || undefined,
+    }));
+    resultEl.textContent = `Standing target for ${target.reg_no}: ${kes(target.current_target_cents)}.`;
+    toast("Vehicle target set");
+    $("#tg-note").value = "";
+    await renderTargets();
   } catch (err) {
-    toast("Invalid JSON: " + err.message, true);
-    return;
+    resultEl.textContent = err.message;
+    toast(err.message, true);
   }
+}
+
+async function startCollection(vehicleId) {
   try {
-    const body = bodyWithTenant({
-      source: "DEVICE",
-      device_id: $("#ing-device").value.trim() || null,
-      vehicle_id: Number($("#ing-vehicle").value) || null,
-      records,
-    });
-    const result = await api("POST", "/api/ingest/batch", body);
-    $("#ing-result").textContent = JSON.stringify(result, null, 2);
-    toast(`Ingested: ${result.accepted_count} accepted, ${result.duplicate_count} duplicates, ${result.missing_sequences.length} gaps`);
-    renderIngest();
+    const day = $("#tg-day-filter").value || todayInput();
+    const row = await api("POST", "/api/daily-collections", bodyWithTenant({
+      vehicle_id: Number(vehicleId), day,
+    }));
+    await renderTargets();
+    const button = document.querySelector(`[data-declare="${row.id}"]`);
+    if (button) openDeclareRow(button);
   } catch (err) {
     toast(err.message, true);
   }
 }
 
-async function runCsvIngest() {
+function openHandoverRow(button) {
+  $$(".inline-row").forEach((row) => row.remove());
+  const row = button.closest("tr");
+  if (!row) return;
+  const add = document.createElement("tr");
+  add.className = "inline-row";
+  add.innerHTML = `<td colspan="9">
+    <div class="inline-form">
+      <input class="handover-amount" type="number" min="0" step="0.01" placeholder="Handed over (KES)">
+      <input class="handover-note" placeholder="Note (optional)" maxlength="300">
+      <button type="button" class="btn primary small" data-handover-save="${button.dataset.handover}">Save</button>
+      <button type="button" class="btn ghost small" data-inline-cancel>Cancel</button>
+    </div>
+  </td>`;
+  row.after(add);
+  add.querySelector(".handover-amount").focus();
+}
+
+async function saveHandover(button) {
+  const row = button.closest(".inline-row");
+  const amount = Number(row.querySelector(".handover-amount").value);
+  if (!Number.isFinite(amount) || amount < 0) {
+    toast("Enter a valid amount", true);
+    return;
+  }
   try {
-    const body = bodyWithTenant({
-      source: "CSV",
-      device_id: $("#csv-device").value.trim() || null,
-      vehicle_id: Number($("#csv-vehicle").value) || null,
-      csv: $("#csv-text").value,
-    });
-    const result = await api("POST", "/api/ingest/csv", body);
-    $("#csv-result").textContent = JSON.stringify(result, null, 2);
-    toast(`CSV: ${result.accepted_count} accepted, ${result.duplicate_count} duplicates, ${result.missing_sequences.length} gaps`);
-    renderIngest();
+    const result = await api(
+      "POST", `/api/targets/${button.dataset.handoverSave}/handover`,
+      bodyWithTenant({
+        handed_over_cents: Math.round(amount * 100),
+        note: row.querySelector(".handover-note").value.trim() || undefined,
+      }),
+    );
+    toast(
+      result.status === "MET"
+        ? "Handover matches target"
+        : `Handover ${result.status.toLowerCase()}`,
+      result.status !== "MET",
+    );
+    await renderTargets();
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+function openDeclareRow(button) {
+  $$(".inline-row").forEach((row) => row.remove());
+  const row = button.closest("tr");
+  if (!row) return;
+  const add = document.createElement("tr");
+  add.className = "inline-row";
+  add.innerHTML = `<td colspan="9">
+    <div class="inline-form">
+      <input class="declare-amount" type="number" min="0" step="0.01" placeholder="Amount collected (KES)">
+      <input class="declare-note" placeholder="Note (optional)" maxlength="300">
+      <button type="button" class="btn primary small" data-declare-save="${button.dataset.declare}">Declare</button>
+      <button type="button" class="btn ghost small" data-inline-cancel>Cancel</button>
+    </div>
+  </td>`;
+  row.after(add);
+  add.querySelector(".declare-amount").focus();
+}
+
+async function saveDeclaration(button) {
+  const row = button.closest(".inline-row");
+  const amount = Number(row.querySelector(".declare-amount").value);
+  if (!Number.isFinite(amount) || amount < 0) {
+    toast("Enter a valid amount", true);
+    return;
+  }
+  try {
+    await api(
+      "POST", `/api/targets/${button.dataset.declareSave}/declare`,
+      bodyWithTenant({
+        declared_cents: Math.round(amount * 100),
+        note: row.querySelector(".declare-note").value.trim() || undefined,
+      }),
+    );
+    toast("Cash declaration recorded");
+    await renderTargets();
   } catch (err) {
     toast(err.message, true);
   }
@@ -545,6 +655,7 @@ async function renderReconciliation() {
   const head = `<thead><tr>
     <th>Period</th><th>Run at</th><th>Transactions</th><th>Total</th>
     <th>Device gaps</th><th>Duplicate groups</th><th>Cash mismatches</th>
+    <th>Target mismatches</th><th>Declaration mismatches</th>
     <th>Open flags</th><th>Score</th>
   </tr></thead>`;
   const body = runs.map((r) => {
@@ -558,6 +669,8 @@ async function renderReconciliation() {
       <td>${gaps ? `<span class="pill HIGH">${gaps}</span>` : "0"}</td>
       <td>${s.duplicate_groups ?? 0}</td>
       <td>${s.cash_mismatches ?? 0}</td>
+      <td>${s.target_mismatches ?? 0}</td>
+      <td>${s.declaration_mismatches ?? 0}</td>
       <td>${r.findings_count}</td>
       <td><strong>${r.integrity_score}</strong></td>
     </tr>`;
@@ -617,8 +730,16 @@ async function verifyAudit() {
 
 /* ---------- reports ---------- */
 
+async function defaultReportDay() {
+  if ($("#report-day").value) return $("#report-day").value;
+  const stats = await api("GET", scopeParam("/api/dashboard/stats"));
+  const day = stats.date || todayInput();
+  $("#report-day").value = day;
+  return day;
+}
+
 async function renderReports() {
-  const day = $("#report-day").value || todayInput();
+  const day = await defaultReportDay();
   const report = await api("GET", scopeParam("/api/reports/sales?day=" + day));
   $("#rep-count").textContent = report.transaction_count;
   $("#rep-total").textContent = kes(report.total_amount_cents);
@@ -646,8 +767,8 @@ function renderReportTable(selector, rows, label, key) {
   el.innerHTML = head + `<tbody>${body}</tbody>`;
 }
 
-function exportReport() {
-  const day = $("#report-day").value || todayInput();
+async function exportReport() {
+  const day = await defaultReportDay();
   window.open(scopeParam("/api/export/sales.csv?day=" + day), "_blank");
 }
 
@@ -769,6 +890,51 @@ function renderRouteTable(routes) {
     <td><button class="btn ghost small" data-route-stage="${r.id}">Add stage</button></td>
   </tr>`).join("");
   el.innerHTML = head + `<tbody>${body}</tbody>`;
+}
+
+function openStageRow(routeId) {
+  $$(".stage-add-row").forEach((row) => row.remove());
+  const button = document.querySelector(`[data-route-stage="${routeId}"]`);
+  const row = button?.closest("tr");
+  if (!row) return;
+  const add = document.createElement("tr");
+  add.className = "stage-add-row";
+  add.innerHTML = `<td colspan="4">
+    <div class="inline-form">
+      <input class="new-stage-name" placeholder="Stage name" maxlength="150">
+      <input class="new-stage-fare" type="number" min="0.01" step="0.01"
+        placeholder="Fare (KES)">
+      <button type="button" class="btn primary small"
+        data-stage-save="${routeId}">Save stage</button>
+      <button type="button" class="btn ghost small" data-stage-cancel>Cancel</button>
+    </div>
+  </td>`;
+  row.after(add);
+  add.querySelector(".new-stage-name").focus();
+}
+
+async function saveStage(button) {
+  const row = button.closest(".stage-add-row");
+  const name = row.querySelector(".new-stage-name").value.trim();
+  const fare = Number(row.querySelector(".new-stage-fare").value);
+  if (!name) {
+    toast("Enter a stage name", true);
+    return;
+  }
+  if (!Number.isFinite(fare) || fare <= 0) {
+    toast("Enter a valid fare", true);
+    return;
+  }
+  try {
+    await api("POST", `/api/routes/${button.dataset.stageSave}/stages`, {
+      name, fare_cents: Math.round(fare * 100),
+    });
+    toast("Stage added");
+    await loadMasters();
+    await renderAdmin();
+  } catch (err) {
+    toast(err.message, true);
+  }
 }
 
 function addStageRow(name = "", fare = "") {
@@ -906,7 +1072,6 @@ function bindEvents() {
 
   $("#rf-route").addEventListener("change", populateStages);
   $("#rf-stage").addEventListener("change", updateAmount);
-  $("#rf-passengers").addEventListener("input", updateAmount);
   $("#record-form").addEventListener("submit", submitRecord);
 
   $("#tf-refresh").addEventListener("click", renderTransactions);
@@ -918,8 +1083,9 @@ function bindEvents() {
     window.open(scopeParam("/api/export/transactions.csv" + (day ? "?day=" + day : "")), "_blank");
   });
 
-  $("#ing-run").addEventListener("click", runBatchIngest);
-  $("#csv-run").addEventListener("click", runCsvIngest);
+  $("#target-form").addEventListener("submit", submitTarget);
+  $("#tg-refresh").addEventListener("click", renderTargets);
+  $("#tg-day-filter").addEventListener("change", renderTargets);
 
   $("#af-refresh").addEventListener("click", renderAnomalies);
   $("#af-status").addEventListener("change", renderAnomalies);
@@ -1015,27 +1181,57 @@ function bindEvents() {
       return;
     }
 
+    const startBtn = event.target.closest("[data-start-collection]");
+    if (startBtn) {
+      await startCollection(startBtn.dataset.startCollection);
+      return;
+    }
+
+    const declareBtn = event.target.closest("[data-declare]");
+    if (declareBtn) {
+      openDeclareRow(declareBtn);
+      return;
+    }
+
+    const declareSave = event.target.closest("[data-declare-save]");
+    if (declareSave) {
+      await saveDeclaration(declareSave);
+      return;
+    }
+
+    const handoverBtn = event.target.closest("[data-handover]");
+    if (handoverBtn) {
+      openHandoverRow(handoverBtn);
+      return;
+    }
+
+    const handoverSave = event.target.closest("[data-handover-save]");
+    if (handoverSave) {
+      await saveHandover(handoverSave);
+      return;
+    }
+
+    const inlineCancel = event.target.closest("[data-inline-cancel]");
+    if (inlineCancel) {
+      inlineCancel.closest(".inline-row")?.remove();
+      return;
+    }
+
     const routeStage = event.target.closest("[data-route-stage]");
     if (routeStage) {
-      const name = prompt("Stage name");
-      if (name === null || !name.trim()) return;
-      const fare = prompt("Fare (KES)");
-      if (fare === null) return;
-      const cents = Math.round(Number(fare) * 100);
-      if (!Number.isFinite(cents) || cents < 0) {
-        toast("Invalid fare", true);
-        return;
-      }
-      try {
-        await api("POST", `/api/routes/${routeStage.dataset.routeStage}/stages`, {
-          name: name.trim(), fare_cents: cents,
-        });
-        toast("Stage added");
-        await loadMasters();
-        await renderAdmin();
-      } catch (err) {
-        toast(err.message, true);
-      }
+      openStageRow(routeStage.dataset.routeStage);
+      return;
+    }
+
+    const stageSave = event.target.closest("[data-stage-save]");
+    if (stageSave) {
+      await saveStage(stageSave);
+      return;
+    }
+
+    const stageCancel = event.target.closest("[data-stage-cancel]");
+    if (stageCancel) {
+      stageCancel.closest(".stage-add-row")?.remove();
       return;
     }
 
@@ -1078,13 +1274,8 @@ function bindEvents() {
 document.addEventListener("DOMContentLoaded", () => {
   bindEvents();
   $("#recon-day").value = todayInput();
-  $("#report-day").value = todayInput();
+  $("#tg-day-filter").value = todayInput();
   resetStageRows();
-  $("#ing-json").value = JSON.stringify([
-    { external_ref: "DEV-1001", device_seq: 1, stage: "Ruiru", passenger_count: 1, amount: 40, method: "CASH", occurred_at: "2026-11-09T08:00:00" },
-    { external_ref: "DEV-1002", device_seq: 2, stage: "Ruiru", passenger_count: 1, amount: 40, method: "CASH", occurred_at: "2026-11-09T08:10:00" },
-    { external_ref: "DEV-1004", device_seq: 4, stage: "Kahawa West", passenger_count: 1, amount: 70, method: "CASH", occurred_at: "2026-11-09T08:20:00" },
-  ], null, 2);
   setInterval(() => {
     if (state.token && state.page === "overview") {
       renderOverview().catch(() => {});

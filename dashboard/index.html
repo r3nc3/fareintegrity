@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FareGuard — Fare Record Integrity</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=10">
 </head>
 <body>
 
@@ -30,13 +30,12 @@
       <div class="brand-mark small">FG</div>
       <div>
         <strong>FareGuard</strong>
-        <span>Integrity, not payments</span>
       </div>
     </div>
     <nav id="nav">
       <button class="nav-item active" data-page="overview">Overview</button>
       <button class="nav-item" data-page="transactions">Transactions</button>
-      <button class="nav-item" data-page="ingest">Device ingest</button>
+      <button class="nav-item" data-page="targets">Daily targets</button>
       <button class="nav-item" data-page="anomalies">Anomalies</button>
       <button class="nav-item" data-page="reconciliation">Reconciliation</button>
       <button class="nav-item" data-page="reports">Reports</button>
@@ -80,7 +79,7 @@
           <span id="stat-sev" class="muted small"></span>
         </div>
         <div class="card">
-          <span class="card-label">Transactions today</span>
+          <span class="card-label" id="stat-day-label">Transactions on latest day</span>
           <div id="stat-today" class="stat">—</div>
           <span id="stat-today-amt" class="muted small"></span>
         </div>
@@ -114,7 +113,7 @@
 
       <div class="panel">
         <div class="panel-head">
-          <h3>Fleet collections today</h3>
+          <h3 id="fleet-day-label">Fleet collections</h3>
           <button class="btn ghost small" id="ov-refresh">Refresh</button>
         </div>
         <div class="table-wrap"><table id="fleet-table"></table></div>
@@ -132,17 +131,16 @@
     <!-- TRANSACTIONS -->
     <section id="page-transactions" class="page hidden">
       <div id="record-panel" class="panel">
-        <div class="panel-head"><h3>Record a fare</h3></div>
-        <p class="muted small">Record a fare collected on a trip. Device and CSV ingestion remain available for synced records.</p>
+        <div class="panel-head"><h3>Record a trip</h3></div>
+        <p class="muted small">Record the total fare collected for one trip. SACCO admins set daily vehicle targets; conductors declare their collected cash and admins log the counted handover.</p>
         <form id="record-form" class="form-grid">
           <label>Vehicle <select id="rf-vehicle" required></select></label>
           <label>Route <select id="rf-route" required></select></label>
           <label>Stage <select id="rf-stage" required></select></label>
-          <label>Passengers <input id="rf-passengers" type="number" min="1" value="1" required></label>
           <label>Tender <select id="rf-method">
             <option>CASH</option><option>MPESA</option><option>CARD</option>
           </select></label>
-          <label>Amount (KES) <input id="rf-amount" type="number" min="0" step="0.01" required></label>
+          <label>Trip total (KES) <input id="rf-amount" type="number" min="0.01" step="0.01" required></label>
           <label>Ticket reference <input id="rf-ref" placeholder="auto-generated"></label>
           <label>Provider receipt <input id="rf-receipt" placeholder="M-PESA / card ref"></label>
           <label class="wide">Occurred at <input id="rf-when" type="datetime-local"></label>
@@ -168,37 +166,30 @@
       </div>
     </section>
 
-    <!-- INGEST -->
-    <section id="page-ingest" class="page hidden">
-      <div class="grid two">
-        <div class="panel">
-          <div class="panel-head"><h3>Device / API batch</h3></div>
-          <p class="muted small">Paste the records a fare device synced. Sequence gaps are detected automatically.</p>
-          <label>Device ID <input id="ing-device" value="DEV-KDG406B"></label>
-          <label>Vehicle <select id="ing-vehicle"></select></label>
-          <label>Records (JSON array)
-            <textarea id="ing-json" rows="10"></textarea>
-          </label>
-          <button id="ing-run" class="btn primary">Ingest batch</button>
-          <pre id="ing-result" class="result"></pre>
-        </div>
-        <div class="panel">
-          <div class="panel-head"><h3>CSV import</h3></div>
-          <p class="muted small">Columns: external_ref, device_seq, stage, passenger_count, amount, method, occurred_at, provider_receipt.</p>
-          <label>Device ID <input id="csv-device" value="DEV-CSV"></label>
-          <label>Vehicle <select id="csv-vehicle"></select></label>
-          <label>CSV
-            <textarea id="csv-text" rows="10">external_ref,device_seq,stage,passenger_count,amount,method,occurred_at
-CSV-001,1,Ruiru,1,40,CASH,2026-11-09T08:00:00
-CSV-002,2,Kahawa West,1,70,CASH,2026-11-09T08:10:00</textarea>
-          </label>
-          <button id="csv-run" class="btn primary">Import CSV</button>
-          <pre id="csv-result" class="result"></pre>
-        </div>
+    <!-- DAILY TARGETS -->
+    <section id="page-targets" class="page hidden">
+      <div class="panel">
+        <div class="panel-head"><h3>Standing daily vehicle target</h3></div>
+        <p class="muted small">Set the amount a vehicle must hand over each day. It stays in force until an admin changes it. Each daily collection snapshots the target at the time it is opened.</p>
+        <form id="target-form" class="form-grid">
+          <label>Vehicle <select id="tg-vehicle" required></select></label>
+          <label>Target (KES) <input id="tg-target" type="number" min="0.01" step="0.01" required></label>
+          <label class="wide">Note <input id="tg-note" placeholder="optional" maxlength="300"></label>
+          <div class="wide form-actions">
+            <button type="submit" class="btn primary">Set target</button>
+            <span id="tg-result" class="muted small"></span>
+          </div>
+        </form>
       </div>
       <div class="panel">
-        <div class="panel-head"><h3>Recent ingest batches</h3></div>
-        <div class="table-wrap"><table id="batch-table"></table></div>
+        <div class="panel-head">
+          <h3>Daily collections, declarations &amp; handovers</h3>
+          <div class="filters">
+            <input id="tg-day-filter" type="date" title="Day of collection">
+            <button class="btn ghost small" id="tg-refresh">Refresh</button>
+          </div>
+        </div>
+        <div class="table-wrap"><table id="target-table"></table></div>
       </div>
     </section>
 
@@ -390,6 +381,6 @@ CSV-002,2,Kahawa West,1,70,CASH,2026-11-09T08:10:00</textarea>
   </main>
 </div>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=10"></script>
 </body>
 </html>
