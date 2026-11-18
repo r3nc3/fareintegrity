@@ -36,9 +36,9 @@ Demo accounts:
 | con@kiambu.demo | Conductor (record fares, own history, declare daily cash) | con12345 |
 | auditor@kiambu.demo | Auditor (read-only) | audit1234 |
 
-The demo database is seeded with planted integrity failures: a duplicate charge,
-a device sequence gap (missing sequence 3), an underpaid fare, and a cash
-variance on a closed shift.
+Seeding creates only the demo accounts, fleet and routes. It does not create
+sample transactions, integrity flags or reconciliation runs; record your own data
+through the dashboard or APIs.
 
 Self-test suite (spawns its own server on port 8032 and exits):
 
@@ -54,7 +54,7 @@ in the Vercel project:
 
 - `DATABASE_URL` — a pooled Postgres connection string, e.g. Neon or Supabase.
   The app creates tables, applies small column migrations and seeds the demo
-  SACCO on first use.
+  SACCO accounts, fleet and routes on first use (no sample data or anomalies).
 - `FAREGUARD_SECRET` — a long random secret used to sign JWTs.
 
 Without `DATABASE_URL` the code still uses local SQLite, but Vercel's filesystem

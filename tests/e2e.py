@@ -283,17 +283,32 @@ class Suite:
         self.check("amount mismatch anomaly is raised", len(amount_flags) >= 1)
 
         # --- 4. reconciliation --------------------------------------------
-        yesterday = (self.today - timedelta(days=1)).isoformat()
-        code, run = api("POST", "/api/reconcile/run", {"day": yesterday}, self.token)
-        _, cash_flags = api("GET", "/api/flags?kind=CASH_MISMATCH&limit=200",
-                            token=self.token)
-        self.check("reconciliation flags the seeded cash variance",
-                   code == 200 and run["summary"]["cash_mismatches"] >= 1
-                   and len(cash_flags) >= 1,
-                   str((code, run.get("summary"))))
+        con_seed_token = login("con@kiambu.demo", "con12345")
+        _, shifts = api("GET", "/api/shifts", token=self.token)
+        open_shift = next(
+            (s for s in shifts if s["vehicle_id"] == 1 and s["status"] == "OPEN"),
+            None,
+        )
+        if open_shift is None:
+            code, open_shift = api(
+                "POST", "/api/shifts/open", {"vehicle_id": 1}, con_seed_token)
+            self.check("conductor can open a shift for cash variance test",
+                       code == 200, str((code, open_shift)))
+        code, _ = api("POST", f"/api/shifts/{open_shift['id']}/close",
+                      {"declared_cash_cents": 50000}, self.token)
+        self.check("admin closes the shift with a cash variance",
+                   code == 200, str(code))
 
+        yesterday = (self.today - timedelta(days=1)).isoformat()
+        api("POST", "/api/reconcile/run", {"day": yesterday}, self.token)
         code, run_today = api("POST", "/api/reconcile/run",
                               {"day": self.today.isoformat()}, self.token)
+        _, cash_flags = api("GET", "/api/flags?kind=CASH_MISMATCH&limit=200",
+                            token=self.token)
+        self.check("reconciliation flags the closed shift cash variance",
+                   code == 200 and run_today["summary"]["cash_mismatches"] >= 1
+                   and len(cash_flags) >= 1,
+                   str((code, run_today.get("summary"))))
         self.check("reconciliation runs for today",
                    code == 200 and "transaction_count" in run_today["summary"],
                    str((code, run_today)))
