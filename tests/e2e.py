@@ -26,6 +26,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 TEST_DB = ROOT / "data" / "test_fareguard.db"
 os.environ["FAREGUARD_DB"] = str(TEST_DB)
+os.environ.pop("DATABASE_URL", None)
+os.environ.pop("SUPABASE_DATABASE_URL", None)
 sys.path.insert(0, str(ROOT))
 
 for suffix in ("", "-wal", "-shm"):

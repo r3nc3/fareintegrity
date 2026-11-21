@@ -46,16 +46,49 @@ Self-test suite (spawns its own server on port 8032 and exits):
 .venv/bin/python tests/e2e.py
 ```
 
+## Connect Supabase
+
+FareGuard connects to Supabase through its PostgreSQL connection string. The
+Supabase project URL, anon key and service-role key are not used by this
+backend.
+
+1. In Supabase, open **Project Settings → Database → Connection strings**.
+2. For Vercel/serverless deployment, copy the **Transaction pooler** URI. It
+   normally uses port `6543` and a host such as
+   `aws-0-<region>.pooler.supabase.com`.
+3. Replace `[YOUR-PASSWORD]` with the database password. URL-encode special
+   characters in the password.
+4. Set the URI as `DATABASE_URL` in the app environment. `SUPABASE_DATABASE_URL`
+   is also accepted as an alias.
+5. Set `FAREGUARD_SECRET` to a long random value used to sign JWTs.
+
+Example Vercel value:
+
+```text
+DATABASE_URL=postgresql://postgres.<project-ref>:<url-encoded-password>@aws-0-<region>.pooler.supabase.com:6543/postgres?pgbouncer=true
+FAREGUARD_SECRET=<long-random-secret>
+```
+
+The app normalizes Supabase URLs to the `psycopg` driver, adds `sslmode=require`
+for Supabase hosts, and uses Non-pooling mode with prepared statements disabled
+for transaction pooler URLs. On first use it creates tables, applies small
+column migrations and seeds only the demo accounts, fleet and routes.
+
+For a local persistent backend, use the direct or session-pooler URI instead:
+
+```bash
+export DATABASE_URL='postgresql://postgres:<url-encoded-password>@db.<project-ref>.supabase.co:5432/postgres'
+export FAREGUARD_SECRET='replace-with-a-long-random-secret'
+./run.sh
+```
+
+Never commit the real connection string or secret to Git.
+
 ## Deploy to Vercel
 
 Import this repository into Vercel. The Python function entrypoint is
-`api/index.py` (Mangum wraps the FastAPI app). Set these environment variables
-in the Vercel project:
-
-- `DATABASE_URL` — a pooled Postgres connection string, e.g. Neon or Supabase.
-  The app creates tables, applies small column migrations and seeds the demo
-  SACCO accounts, fleet and routes on first use (no sample data or anomalies).
-- `FAREGUARD_SECRET` — a long random secret used to sign JWTs.
+`api/index.py` (Mangum wraps the FastAPI app). Set `DATABASE_URL` and
+`FAREGUARD_SECRET` as described above.
 
 Without `DATABASE_URL` the code still uses local SQLite, but Vercel's filesystem
 is ephemeral, so that mode is only suitable for local development and tests.
@@ -142,7 +175,7 @@ the dashboard. Shifts can only be closed by admins.
 
 ## Stack
 
-FastAPI · SQLAlchemy · SQLite (prototype) · PyJWT · vanilla-JS dashboard.
+FastAPI · SQLAlchemy · PostgreSQL/Supabase · SQLite (local fallback) · PyJWT · vanilla-JS dashboard.
 Money is stored as integer cents.
 
 ## Production roadmap

@@ -52,6 +52,7 @@ DASHBOARD_DIR = ROOT / "dashboard"
 
 
 def _ensure_target_schema():
+    timestamp_type = "TIMESTAMP" if engine.dialect.name == "postgresql" else "DATETIME"
     with engine.connect() as conn:
         daily_columns = {
             column["name"] for column in inspect(conn).get_columns("daily_targets")
@@ -59,7 +60,7 @@ def _ensure_target_schema():
         for name, ddl in (
             ("declared_cents", "INTEGER"),
             ("declared_by", "INTEGER"),
-            ("declared_at", "DATETIME"),
+            ("declared_at", timestamp_type),
         ):
             if name not in daily_columns:
                 conn.execute(text(f"ALTER TABLE daily_targets ADD COLUMN {name} {ddl}"))
@@ -68,7 +69,7 @@ def _ensure_target_schema():
         }
         for name, ddl in (
             ("daily_target_cents", "INTEGER"),
-            ("target_updated_at", "DATETIME"),
+            ("target_updated_at", timestamp_type),
             ("target_updated_by", "INTEGER"),
         ):
             if name not in vehicle_columns:
