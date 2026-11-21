@@ -2,6 +2,7 @@ import csv
 import io
 import json
 import re
+import secrets
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -46,6 +47,8 @@ from .security import (
 )
 from .seed import seed as seed_db
 from .services import reconciliation
+from . import supabase_auth
+from .supabase_auth import SupabaseAuthError
 
 ROOT = Path(__file__).resolve().parent.parent
 DASHBOARD_DIR = ROOT / "dashboard"
@@ -74,6 +77,15 @@ def _ensure_target_schema():
         ):
             if name not in vehicle_columns:
                 conn.execute(text(f"ALTER TABLE vehicles ADD COLUMN {name} {ddl}"))
+        user_columns = {
+            column["name"] for column in inspect(conn).get_columns("users")
+        }
+        if "supabase_user_id" not in user_columns:
+            conn.execute(text("ALTER TABLE users ADD COLUMN supabase_user_id VARCHAR(64)"))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_users_supabase_id "
+            "ON users (supabase_user_id) WHERE supabase_user_id IS NOT NULL"
+        ))
         conn.commit()
 
     with Session(engine) as db:
@@ -229,23 +241,105 @@ def integrity_exception_handler(request, exc: integrity.IntegrityViolation):
 
 # ---------- auth ----------
 
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
 class LoginBody(BaseModel):
-    email: str
-    password: str
+    email: str = Field(..., max_length=150)
+    password: str = Field(..., max_length=200)
 
 
-@app.post("/api/auth/login")
-def login(body: LoginBody, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == body.email.lower()).first()
-    if user is None or not verify_password(body.password, user.password_hash):
-        raise HTTPException(401, "Invalid credentials")
+class SignupBody(BaseModel):
+    email: str = Field(..., max_length=150)
+    password: str = Field(..., min_length=8, max_length=200)
+    full_name: str = Field(..., min_length=2, max_length=150)
+    sacco_name: str = Field(..., min_length=2, max_length=200)
+
+
+def _normalise_email(email: str) -> str:
+    value = email.strip().lower()
+    if not _EMAIL_RE.fullmatch(value):
+        raise HTTPException(422, "Enter a valid email address")
+    return value
+
+
+def _text(value, limit: int, fallback: str) -> str:
+    cleaned = str(value or "").strip()
+    return cleaned[:limit] if cleaned else fallback
+
+
+def _supabase_error(error: SupabaseAuthError) -> HTTPException:
+    message = error.message.lower()
+    if "not confirmed" in message or "confirm" in message:
+        return HTTPException(403, "Confirm your email address before signing in")
+    if "already registered" in message or "already exists" in message:
+        return HTTPException(409, "An account with that email already exists")
+    if "invalid" in message:
+        return HTTPException(401, "Invalid credentials")
+    if "password" in message and error.status_code in (400, 422):
+        return HTTPException(422, error.message)
+    return HTTPException(error.status_code, error.message)
+
+
+def _sync_supabase_user(db: Session, remote: dict, action: str) -> User:
+    remote_id = str(remote.get("id") or "").strip()
+    email = _normalise_email(str(remote.get("email") or ""))
+    if not remote_id:
+        raise HTTPException(502, "Supabase Auth returned an invalid user")
+
+    metadata = remote.get("user_metadata") or {}
+    user = db.query(User).filter(User.supabase_user_id == remote_id).first()
+    created = False
+
+    if user is None:
+        user = db.query(User).filter(User.email == email).first()
+        if user is not None:
+            raise HTTPException(
+                409,
+                "That email is already registered. Sign in with its existing password.",
+            )
+        else:
+            domain = email.rsplit("@", 1)[-1].split(".")[0].replace("-", " ").title()
+            sacco_name = _text(metadata.get("sacco_name"), 200, f"{domain} SACCO")
+            full_name = _text(metadata.get("full_name"), 150, email.split("@", 1)[0])
+            tenant = Tenant(
+                name=sacco_name,
+                contact_email=email,
+                subscription_active=True,
+            )
+            db.add(tenant)
+            db.flush()
+            user = User(
+                tenant_id=tenant.id,
+                email=email,
+                password_hash=hash_password(secrets.token_urlsafe(32)),
+                full_name=full_name,
+                role=ROLE_SACCO,
+                active=True,
+                supabase_user_id=remote_id,
+            )
+            db.add(user)
+            db.flush()
+            created = True
+
+    if user.email != email:
+        conflict = db.query(User).filter(User.email == email).first()
+        if conflict is not None and conflict.id != user.id:
+            raise HTTPException(409, "That email is already in use")
+        user.email = email
     if not user.active:
         raise HTTPException(403, "Account disabled")
+
     log_audit(
         db, tenant_id=user.tenant_id, actor_id=user.id, actor_email=user.email,
-        action="LOGIN", entity="user", entity_id=user.id, summary="login success",
+        action=action, entity="user", entity_id=user.id,
+        summary="Supabase account linked" if created else "Supabase sign-in success",
     )
     db.commit()
+    return user
+
+
+def _auth_payload(db: Session, user: User) -> dict:
     tenant = db.get(Tenant, user.tenant_id) if user.tenant_id else None
     return {
         "token": make_token(user),
@@ -258,6 +352,82 @@ def login(body: LoginBody, db: Session = Depends(get_db)):
             "tenant_name": tenant.name if tenant else None,
         },
     }
+
+
+def _local_login(db: Session, email: str, password: str) -> dict:
+    user = db.query(User).filter(User.email == email).first()
+    if user is None or not verify_password(password, user.password_hash):
+        raise HTTPException(401, "Invalid credentials")
+    if not user.active:
+        raise HTTPException(403, "Account disabled")
+    log_audit(
+        db, tenant_id=user.tenant_id, actor_id=user.id, actor_email=user.email,
+        action="LOGIN", entity="user", entity_id=user.id, summary="login success",
+    )
+    db.commit()
+    return _auth_payload(db, user)
+
+
+@app.get("/api/auth/config")
+def auth_config():
+    return {"supabase_enabled": supabase_auth.is_configured()}
+
+
+@app.post("/api/auth/signup")
+def signup(body: SignupBody, db: Session = Depends(get_db)):
+    if not supabase_auth.is_configured():
+        raise HTTPException(503, "Supabase Auth is not configured")
+    email = _normalise_email(body.email)
+    if db.query(User).filter(User.email == email).first() is not None:
+        raise HTTPException(409, "An account with that email already exists")
+    try:
+        result = supabase_auth.sign_up(email, body.password, {
+            "full_name": body.full_name.strip(),
+            "sacco_name": body.sacco_name.strip(),
+            "signup_source": "fareguard_dashboard",
+        })
+    except SupabaseAuthError as error:
+        raise _supabase_error(error)
+
+    token = supabase_auth.access_token(result)
+    if not token:
+        return {
+            "needs_confirmation": True,
+            "message": "Check your email to confirm your address, then sign in.",
+        }
+    try:
+        remote = supabase_auth.get_user(token)
+        user = _sync_supabase_user(db, remote, "SUPABASE_SIGNUP")
+    except SupabaseAuthError as error:
+        raise _supabase_error(error)
+    return _auth_payload(db, user)
+
+
+@app.post("/api/auth/login")
+def login(body: LoginBody, db: Session = Depends(get_db)):
+    email = _normalise_email(body.email)
+    if supabase_auth.is_configured():
+        try:
+            result = supabase_auth.sign_in(email, body.password)
+            token = supabase_auth.access_token(result)
+            if not token:
+                raise SupabaseAuthError("Supabase Auth did not return a session", 401)
+            remote = supabase_auth.get_user(token)
+            user = _sync_supabase_user(db, remote, "SUPABASE_LOGIN")
+            return _auth_payload(db, user)
+        except SupabaseAuthError as error:
+            message = error.message.lower()
+            if "confirm" not in message:
+                if db.query(User).filter(
+                    User.email == email, User.supabase_user_id.isnot(None)
+                ).first() is not None:
+                    raise _supabase_error(error)
+                try:
+                    return _local_login(db, email, body.password)
+                except HTTPException:
+                    raise _supabase_error(error)
+            raise _supabase_error(error)
+    return _local_login(db, email, body.password)
 
 
 @app.get("/api/me")

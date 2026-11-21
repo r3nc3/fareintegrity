@@ -6,9 +6,10 @@ Exercises the real HTTP API and asserts:
   3. suspected duplicate fingerprints are flagged for review
   4. device sequence gaps are detected (missing / disappearing records)
   5. reconciliation catches cash variances and amount mismatches
-  6. the audit chain is append-only and tamper-evident
-  7. tenant isolation and role enforcement
-  8. the platform is NOT a payment processor (no payment endpoints)
+   6. the audit chain is append-only and tamper-evident
+   7. tenant isolation and role enforcement
+   8. the platform is NOT a payment processor (no payment endpoints)
+   9. Supabase Auth stays disabled when its environment is not configured
 
 Usage:  .venv/bin/python tests/e2e.py
 """
@@ -28,6 +29,9 @@ TEST_DB = ROOT / "data" / "test_fareguard.db"
 os.environ["FAREGUARD_DB"] = str(TEST_DB)
 os.environ.pop("DATABASE_URL", None)
 os.environ.pop("SUPABASE_DATABASE_URL", None)
+os.environ.pop("SUPABASE_URL", None)
+os.environ.pop("SUPABASE_ANON_KEY", None)
+os.environ.pop("SUPABASE_PUBLISHABLE_KEY", None)
 sys.path.insert(0, str(ROOT))
 
 for suffix in ("", "-wal", "-shm"):
@@ -115,6 +119,17 @@ class Suite:
     def run_all(self):
         _start_server()
         self.token = login("admin@kiambu.demo", "sacco1234")
+
+        code, config = api("GET", "/api/auth/config")
+        self.check("Supabase Auth reports disabled without configuration",
+                   code == 200 and config.get("supabase_enabled") is False,
+                   str((code, config)))
+        code, _ = api("POST", "/api/auth/signup", {
+            "email": "test@example.com", "password": "password123",
+            "full_name": "Test User", "sacco_name": "Test SACCO",
+        })
+        self.check("signup is unavailable when Supabase Auth is off",
+                   code == 503, str(code))
 
         _, routes = api("GET", "/api/routes", token=self.token)
         self.stage = {s["name"]: s for r in routes for s in r["stages"]}

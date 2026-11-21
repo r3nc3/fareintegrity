@@ -8,6 +8,7 @@ const state = {
   vehicleMap: {},
   stageMap: {},
   page: "overview",
+  supabaseEnabled: false,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -110,6 +111,39 @@ async function api(method, path, body) {
 
 /* ---------- auth ---------- */
 
+async function applyAuth(data) {
+  state.token = data.token;
+  state.user = data.user;
+  state.tenantId = data.user.tenant_id;
+  localStorage.setItem("fareguard_token", data.token);
+  await bootstrap();
+}
+
+async function loadAuthConfig() {
+  try {
+    const config = await api("GET", "/api/auth/config");
+    state.supabaseEnabled = Boolean(config && config.supabase_enabled);
+    $("#show-signup").classList.toggle("hidden", !state.supabaseEnabled);
+  } catch {
+    state.supabaseEnabled = false;
+    $("#show-signup").classList.add("hidden");
+  }
+}
+
+function showSignup() {
+  $("#login-form").classList.add("hidden");
+  $("#signup-form").classList.remove("hidden");
+  $("#login-error").textContent = "";
+  $("#signup-error").textContent = "";
+}
+
+function showLogin() {
+  $("#signup-form").classList.add("hidden");
+  $("#login-form").classList.remove("hidden");
+  $("#signup-error").textContent = "";
+  $("#login-error").textContent = "";
+}
+
 async function doLogin(event) {
   event.preventDefault();
   $("#login-error").textContent = "";
@@ -118,13 +152,34 @@ async function doLogin(event) {
       email: $("#login-email").value.trim(),
       password: $("#login-password").value,
     });
-    state.token = data.token;
-    state.user = data.user;
-    state.tenantId = data.user.tenant_id;
-    localStorage.setItem("fareguard_token", data.token);
-    await bootstrap();
+    await applyAuth(data);
   } catch (err) {
     $("#login-error").textContent = err.message;
+  }
+}
+
+async function doSignup(event) {
+  event.preventDefault();
+  $("#signup-error").textContent = "";
+  const password = $("#signup-password").value;
+  if (password !== $("#signup-confirm").value) {
+    $("#signup-error").textContent = "Passwords do not match";
+    return;
+  }
+  try {
+    const data = await api("POST", "/api/auth/signup", {
+      email: $("#signup-email").value.trim(),
+      password,
+      full_name: $("#signup-full-name").value.trim(),
+      sacco_name: $("#signup-sacco-name").value.trim(),
+    });
+    if (data.needs_confirmation) {
+      $("#signup-error").textContent = data.message;
+      return;
+    }
+    await applyAuth(data);
+  } catch (err) {
+    $("#signup-error").textContent = err.message;
   }
 }
 
@@ -135,6 +190,7 @@ function logout() {
   localStorage.removeItem("fareguard_token");
   $("#app-view").classList.add("hidden");
   $("#login-view").classList.remove("hidden");
+  showLogin();
 }
 
 async function resume() {
@@ -1058,6 +1114,9 @@ async function submitRoute(event) {
 
 function bindEvents() {
   $("#login-form").addEventListener("submit", doLogin);
+  $("#signup-form").addEventListener("submit", doSignup);
+  $("#show-signup").addEventListener("click", showSignup);
+  $("#show-login").addEventListener("click", showLogin);
   $("#logout-btn").addEventListener("click", logout);
   $$(".nav-item").forEach((btn) => {
     btn.addEventListener("click", () => navigate(btn.dataset.page));
@@ -1271,7 +1330,7 @@ function bindEvents() {
 
 /* ---------- init ---------- */
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
   bindEvents();
   $("#recon-day").value = todayInput();
   $("#tg-day-filter").value = todayInput();
@@ -1281,5 +1340,6 @@ document.addEventListener("DOMContentLoaded", () => {
       renderOverview().catch(() => {});
     }
   }, 30000);
+  await loadAuthConfig();
   resume();
 });

@@ -48,9 +48,17 @@ Self-test suite (spawns its own server on port 8032 and exits):
 
 ## Connect Supabase
 
-FareGuard connects to Supabase through its PostgreSQL connection string. The
-Supabase project URL, anon key and service-role key are not used by this
-backend.
+FareGuard uses Supabase in two independent ways:
+
+| Purpose | Environment variables |
+|---|---|
+| PostgreSQL data storage | `DATABASE_URL` (or `SUPABASE_DATABASE_URL`) |
+| Email signup and login | `SUPABASE_URL` and `SUPABASE_ANON_KEY` |
+
+The service-role key is never used. Leave the Supabase Auth variables unset to
+run with local demo accounts only.
+
+### Database
 
 1. In Supabase, open **Project Settings → Database → Connection strings**.
 2. For Vercel/serverless deployment, copy the **Transaction pooler** URI. It
@@ -60,14 +68,7 @@ backend.
    characters in the password.
 4. Set the URI as `DATABASE_URL` in the app environment. `SUPABASE_DATABASE_URL`
    is also accepted as an alias.
-5. Set `FAREGUARD_SECRET` to a long random value used to sign JWTs.
-
-Example Vercel value:
-
-```text
-DATABASE_URL=postgresql://postgres.<project-ref>:<url-encoded-password>@aws-0-<region>.pooler.supabase.com:6543/postgres?pgbouncer=true
-FAREGUARD_SECRET=<long-random-secret>
-```
+5. Set `FAREGUARD_SECRET` to a long random value used to sign FareGuard JWTs.
 
 The app normalizes Supabase URLs to the `psycopg` driver, adds `sslmode=require`
 for Supabase hosts, and uses Non-pooling mode with prepared statements disabled
@@ -82,13 +83,47 @@ export FAREGUARD_SECRET='replace-with-a-long-random-secret'
 ./run.sh
 ```
 
-Never commit the real connection string or secret to Git.
+### Email signup and login
+
+1. In Supabase, open **Authentication → Providers → Email** and enable email
+   signups. Email confirmation can be enabled or disabled; both flows work.
+2. In **Project Settings → API**, copy the **Project URL** and the anon /
+   publishable key. Do not use the service-role key.
+3. Set them as `SUPABASE_URL` and `SUPABASE_ANON_KEY` (`SUPABASE_PUBLISHABLE_KEY`
+   is accepted as an alias for the key).
+4. Set `FAREGUARD_SECRET` as above; Supabase tokens are exchanged for signed
+   FareGuard session tokens after verification.
+5. Redeploy Vercel after adding the variables.
+
+When Supabase Auth is configured, the sign-in page shows **Create a SACCO
+account**. Signup asks for full name, SACCO name, email and password. FareGuard
+stores the SACCO name and full name in Supabase user metadata; on the first
+verified sign-in it creates the SACCO tenant and makes that user its
+`SACCO_ADMIN`. Role metadata is never accepted from the browser.
+
+If email confirmation is enabled, signup tells the user to check their email;
+the FareGuard account is created after they confirm and sign in. If it is
+disabled, signup signs the user in immediately. Existing local accounts are not
+auto-linked to a Supabase identity, so they cannot be taken over by a matching
+email; they continue to work with their existing password. Supabase Auth only
+takes over an account once it is linked by `supabase_user_id`.
+
+Example Vercel values:
+
+```text
+DATABASE_URL=postgresql://postgres.<project-ref>:<url-encoded-password>@aws-0-<region>.pooler.supabase.com:6543/postgres?pgbouncer=true
+FAREGUARD_SECRET=<long-random-secret>
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_ANON_KEY=<anon-or-publishable-key>
+```
+
+Never commit the real connection string, keys or secret to Git.
 
 ## Deploy to Vercel
 
 Import this repository into Vercel. The Python function entrypoint is
-`api/index.py` (Mangum wraps the FastAPI app). Set `DATABASE_URL` and
-`FAREGUARD_SECRET` as described above.
+`api/index.py` (Mangum wraps the FastAPI app). Set `DATABASE_URL`,
+`FAREGUARD_SECRET`, `SUPABASE_URL` and `SUPABASE_ANON_KEY` as described above.
 
 Without `DATABASE_URL` the code still uses local SQLite, but Vercel's filesystem
 is ephemeral, so that mode is only suitable for local development and tests.
@@ -125,7 +160,9 @@ is ephemeral, so that mode is only suitable for local development and tests.
 
 ## Key API surface
 
-- `POST /api/auth/login` — JWT (PBKDF2-hashed passwords, HS256)
+- `GET /api/auth/config` — whether Supabase email signup is enabled
+- `POST /api/auth/signup` — Supabase email signup (creates a SACCO tenant and admin)
+- `POST /api/auth/login` — Supabase Auth when configured, local PBKDF2 fallback otherwise; returns a signed FareGuard JWT
 - `POST /api/transactions` (conductors record their own; admins any trip), `GET /api/transactions` (conductors see only their own), `GET /api/transactions/{id}`, `POST /api/transactions/{id}/reverse`
 - `GET /api/targets`, `POST /api/targets` — standing daily target per vehicle (admin sets/changes it)
 - `POST /api/daily-collections`, `POST /api/targets/{id}/declare`, `POST /api/targets/{id}/handover` — daily collections, conductor declarations and admin-logged handovers
@@ -175,7 +212,7 @@ the dashboard. Shifts can only be closed by admins.
 
 ## Stack
 
-FastAPI · SQLAlchemy · PostgreSQL/Supabase · SQLite (local fallback) · PyJWT · vanilla-JS dashboard.
+FastAPI · SQLAlchemy · PostgreSQL/Supabase · Supabase Auth · SQLite (local fallback) · PyJWT · vanilla-JS dashboard.
 Money is stored as integer cents.
 
 ## Production roadmap

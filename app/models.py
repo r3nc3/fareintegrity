@@ -37,7 +37,14 @@ class Tenant(Base):
 
 class User(Base):
     __tablename__ = "users"
-    __table_args__ = (UniqueConstraint("email", name="uq_users_email"),)
+    __table_args__ = (
+        UniqueConstraint("email", name="uq_users_email"),
+        Index(
+            "uq_users_supabase_id", "supabase_user_id", unique=True,
+            sqlite_where=text("supabase_user_id IS NOT NULL"),
+            postgresql_where=text("supabase_user_id IS NOT NULL"),
+        ),
+    )
 
     id = Column(Integer, primary_key=True)
     tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True)
@@ -48,6 +55,7 @@ class User(Base):
     role = Column(String(30), nullable=False)
     active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=utcnow)
+    supabase_user_id = Column(String(64), nullable=True)
 
     tenant = relationship("Tenant", back_populates="users")
 

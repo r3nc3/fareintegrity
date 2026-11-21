@@ -20,7 +20,34 @@
       <input id="login-password" type="password" placeholder="Password" required>
     </label>
     <button type="submit" class="btn primary">Sign in</button>
+    <button id="show-signup" type="button" class="btn ghost small hidden">
+      Create a SACCO account
+    </button>
     <p id="login-error" class="error"></p>
+  </form>
+
+  <form id="signup-form" class="login-card hidden" autocomplete="on">
+    <div class="brand-mark">FG</div>
+    <h1>Create account</h1>
+    <p class="sub">Register your SACCO on FareGuard</p>
+    <label>Full name
+      <input id="signup-full-name" type="text" placeholder="Your full name" required>
+    </label>
+    <label>SACCO name
+      <input id="signup-sacco-name" type="text" placeholder="Your SACCO" required>
+    </label>
+    <label>Email
+      <input id="signup-email" type="email" placeholder="you@example.com" required>
+    </label>
+    <label>Password
+      <input id="signup-password" type="password" placeholder="At least 8 characters" minlength="8" required>
+    </label>
+    <label>Confirm password
+      <input id="signup-confirm" type="password" placeholder="Repeat password" minlength="8" required>
+    </label>
+    <button type="submit" class="btn primary">Create account</button>
+    <button id="show-login" type="button" class="btn ghost small">Back to sign in</button>
+    <p id="signup-error" class="error"></p>
   </form>
 </div>
 
@@ -381,6 +408,6 @@
   </main>
 </div>
 
-<script src="/static/app.js?v=10"></script>
+<script src="/static/app.js?v=11"></script>
 </body>
 </html>
