@@ -6,13 +6,13 @@
   --panel: #ffffff;
   --panel-2: #f1f4f9;
   --border: #dce3ed;
-  --text: #16233a;
-  --muted: #6b7a91;
+  --text: #111827;
+  --muted: #3f4b5e;
   --accent: var(--navy-2);
-  --accent-2: #4a6a9c;
-  --danger: #c0392b;
-  --warn: #a16207;
-  --ok: #15803d;
+  --accent-2: #274c82;
+  --danger: #a3271d;
+  --warn: #8a5200;
+  --ok: #0f6b34;
   --radius: 10px;
 }
 
@@ -149,6 +149,7 @@ input, select, textarea {
   color: var(--text); border-radius: 7px; padding: 8px 10px;
   font-family: inherit; font-size: 13px; width: 100%;
 }
+input::placeholder, textarea::placeholder { color: #5b6878; opacity: 1; }
 input:focus, select:focus, textarea:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
 textarea { resize: vertical; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
 label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
