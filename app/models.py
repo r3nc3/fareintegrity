@@ -231,6 +231,17 @@ class IntegrityFlag(Base):
     resolution_note = Column(String(400), nullable=True)
 
 
+class PasswordReset(Base):
+    __tablename__ = "password_resets"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    token_hash = Column(String(64), nullable=False, unique=True)
+    expires_at = Column(DateTime, nullable=False)
+    used_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=utcnow)
+
+
 class AuditLog(Base):
     """Append-only, hash-chained record of every state change."""
 

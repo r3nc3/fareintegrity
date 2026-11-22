@@ -1,13 +1,16 @@
 import csv
+import hashlib
 import io
 import json
+import os
 import re
 import secrets
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -15,7 +18,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 
-from . import integrity
+from . import emailer, integrity
 from .audit import log_audit, verify_chain
 from .db import Base, engine, get_db
 from .models import (
@@ -24,6 +27,7 @@ from .models import (
     FareTransaction,
     IngestBatch,
     IntegrityFlag,
+    PasswordReset,
     ReconciliationRun,
     Route,
     Shift,
@@ -261,7 +265,8 @@ class RecoverBody(BaseModel):
 
 
 class ResetPasswordBody(BaseModel):
-    access_token: str = Field(..., min_length=1)
+    token: str | None = Field(default=None, min_length=1)
+    access_token: str | None = Field(default=None, min_length=1)
     password: str = Field(..., min_length=8, max_length=200)
 
 
@@ -288,6 +293,11 @@ def _supabase_error(error: SupabaseAuthError) -> HTTPException:
     if "password" in message and error.status_code in (400, 422):
         return HTTPException(422, error.message)
     return HTTPException(error.status_code, error.message)
+
+
+def _app_url(request: Request) -> str:
+    configured = os.environ.get("APP_URL", "").strip().rstrip("/")
+    return configured or str(request.base_url).rstrip("/")
 
 
 def _sync_supabase_user(db: Session, remote: dict, action: str) -> User:
@@ -379,7 +389,10 @@ def _local_login(db: Session, email: str, password: str) -> dict:
 
 @app.get("/api/auth/config")
 def auth_config():
-    return {"supabase_enabled": supabase_auth.is_configured()}
+    return {
+        "supabase_enabled": supabase_auth.is_configured(),
+        "email_recovery_enabled": emailer.is_configured(),
+    }
 
 
 @app.post("/api/auth/signup")
@@ -440,29 +453,74 @@ def login(body: LoginBody, db: Session = Depends(get_db)):
 
 
 @app.post("/api/auth/recover")
-def recover_password(body: RecoverBody):
-    if not supabase_auth.is_configured():
-        raise HTTPException(503, "Supabase Auth is not configured")
+def recover_password(body: RecoverBody, request: Request,
+                     db: Session = Depends(get_db)):
     email = _normalise_email(body.email)
-    try:
-        supabase_auth.recover(email)
-    except SupabaseAuthError as error:
-        raise _supabase_error(error)
+    user = db.query(User).filter(User.email == email).first()
+    if user is not None and user.supabase_user_id and supabase_auth.is_configured():
+        try:
+            supabase_auth.recover(email)
+        except SupabaseAuthError as error:
+            raise _supabase_error(error)
+    elif user is not None and user.active and emailer.is_configured():
+        token = secrets.token_urlsafe(32)
+        db.query(PasswordReset).filter(
+            PasswordReset.user_id == user.id,
+            PasswordReset.used_at.is_(None),
+        ).update({PasswordReset.used_at: utcnow()})
+        db.add(PasswordReset(
+            user_id=user.id,
+            token_hash=hashlib.sha256(token.encode()).hexdigest(),
+            expires_at=utcnow() + timedelta(minutes=30),
+        ))
+        db.commit()
+        link = f"{_app_url(request)}/#type=recovery&token={quote(token)}"
+        try:
+            emailer.send_password_reset_email(user.email, link)
+        except Exception:
+            raise HTTPException(502, "Could not send the reset email")
+        log_audit(
+            db, tenant_id=user.tenant_id, actor_id=user.id, actor_email=user.email,
+            action="PASSWORD_RESET_REQUESTED", entity="user", entity_id=user.id,
+            summary="Password reset link issued",
+        )
+        db.commit()
     return {"message": "If that email has an account, a reset link has been sent."}
 
 
 @app.post("/api/auth/reset-password")
-def reset_password(body: ResetPasswordBody):
-    if not supabase_auth.is_configured():
-        raise HTTPException(503, "Supabase Auth is not configured")
-    try:
-        supabase_auth.update_password(body.access_token, body.password)
-    except SupabaseAuthError as error:
-        message = error.message.lower()
-        if "expired" in message or "invalid" in message or "jwt" in message:
+def reset_password(body: ResetPasswordBody, db: Session = Depends(get_db)):
+    if body.token:
+        token_hash = hashlib.sha256(body.token.encode()).hexdigest()
+        reset = db.query(PasswordReset).filter(
+            PasswordReset.token_hash == token_hash,
+            PasswordReset.used_at.is_(None),
+            PasswordReset.expires_at > utcnow(),
+        ).first()
+        user = db.get(User, reset.user_id) if reset is not None else None
+        if user is None or not user.active:
             raise HTTPException(401, "Reset link is invalid or has expired")
-        raise _supabase_error(error)
-    return {"message": "Password updated. You can sign in now."}
+        user.password_hash = hash_password(body.password)
+        reset.used_at = utcnow()
+        log_audit(
+            db, tenant_id=user.tenant_id, actor_id=user.id, actor_email=user.email,
+            action="PASSWORD_RESET", entity="user", entity_id=user.id,
+            summary="Password reset via email link",
+        )
+        db.commit()
+        return {"message": "Password updated. You can sign in now."}
+    if body.access_token:
+        if not supabase_auth.is_configured():
+            raise HTTPException(503, "Supabase Auth is not configured")
+        try:
+            supabase_auth.update_password(body.access_token, body.password)
+        except SupabaseAuthError as error:
+            message = error.message.lower()
+            if "expired" in message or "invalid" in message or "jwt" in message:
+                raise HTTPException(401, "Reset link is invalid or has expired")
+            raise _supabase_error(error)
+        return {"message": "Password updated. You can sign in now."}
+    raise HTTPException(422, "Provide a reset token")
 
 
 @app.get("/api/me")

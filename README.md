@@ -110,12 +110,20 @@ takes over an account once it is linked by `supabase_user_id`.
 
 ### Password recovery
 
-When Supabase Auth is configured, **Forgot password?** on the sign-in page
-sends a Supabase recovery email. Set the Supabase **Site URL** to the dashboard
-URL so the link returns to FareGuard; the dashboard detects the recovery token
-in the URL, asks for a new password, and updates it through Supabase Auth.
-Local accounts have no email delivery, so an administrator must change their
-password from **Manage → Users**.
+**Forgot password?** works for every account with an email address.
+
+- Supabase identities (SACCO admins created by signup) get a Supabase recovery
+  email. Set the Supabase **Site URL** to the dashboard URL so the reset link
+  returns to FareGuard.
+- Local accounts (conductors, auditors and demo users) get an email from
+  FareGuard with a single-use link that expires after 30 minutes. Configure an
+  SMTP relay with `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`,
+  `SMTP_FROM` and `SMTP_TLS` (`starttls`, `ssl` or `none`), and set `APP_URL` to
+  the dashboard URL so the link points at the right host.
+
+The dashboard detects the recovery token in the link, asks for a new password,
+and updates it. If neither Supabase Auth nor SMTP is configured, the page tells
+the user to contact their administrator instead.
 
 Example Vercel values:
 
@@ -124,6 +132,13 @@ DATABASE_URL=postgresql://postgres.<project-ref>:<url-encoded-password>@aws-0-<r
 FAREGUARD_SECRET=<long-random-secret>
 SUPABASE_URL=https://<project-ref>.supabase.co
 SUPABASE_ANON_KEY=<anon-or-publishable-key>
+APP_URL=https://your-dashboard-domain.example
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USER=<smtp-username>
+SMTP_PASSWORD=<smtp-password>
+SMTP_FROM=no-reply@yourdomain.example
+SMTP_TLS=starttls
 ```
 
 Never commit the real connection string, keys or secret to Git.
@@ -172,8 +187,8 @@ is ephemeral, so that mode is only suitable for local development and tests.
 - `GET /api/auth/config` — whether Supabase email signup is enabled
 - `POST /api/auth/signup` — Supabase email signup (creates a SACCO tenant and admin)
 - `POST /api/auth/login` — Supabase Auth when configured, local PBKDF2 fallback otherwise; returns a signed FareGuard JWT
-- `POST /api/auth/recover` — send a Supabase password-reset email
-- `POST /api/auth/reset-password` — set a new password using a recovery access token
+- `POST /api/auth/recover` — send a Supabase recovery email or an SMTP reset link for local accounts
+- `POST /api/auth/reset-password` — set a new password using a recovery token or Supabase access token
 - `POST /api/transactions` (conductors record their own; admins any trip), `GET /api/transactions` (conductors see only their own), `GET /api/transactions/{id}`, `POST /api/transactions/{id}/reverse`
 - `GET /api/targets`, `POST /api/targets` — standing daily target per vehicle (admin sets/changes it)
 - `POST /api/daily-collections`, `POST /api/targets/{id}/declare`, `POST /api/targets/{id}/handover` — daily collections, conductor declarations and admin-logged handovers

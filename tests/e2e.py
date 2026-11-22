@@ -9,7 +9,9 @@ Exercises the real HTTP API and asserts:
    6. the audit chain is append-only and tamper-evident
    7. tenant isolation and role enforcement
    8. the platform is NOT a payment processor (no payment endpoints)
-   9. Supabase Auth stays disabled when its environment is not configured
+    9. Supabase Auth stays disabled when its environment is not configured
+   10. local accounts can reset their password through an emailed link
+
 
 Usage:  .venv/bin/python tests/e2e.py
 """
@@ -23,6 +25,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
 TEST_DB = ROOT / "data" / "test_fareguard.db"
@@ -32,6 +35,8 @@ os.environ.pop("SUPABASE_DATABASE_URL", None)
 os.environ.pop("SUPABASE_URL", None)
 os.environ.pop("SUPABASE_ANON_KEY", None)
 os.environ.pop("SUPABASE_PUBLISHABLE_KEY", None)
+os.environ["APP_URL"] = "http://testserver"
+os.environ["SMTP_HOST"] = "localhost"
 sys.path.insert(0, str(ROOT))
 
 for suffix in ("", "-wal", "-shm"):
@@ -118,11 +123,15 @@ class Suite:
 
     def run_all(self):
         _start_server()
+        import app.emailer as emailer
+        sent_links = []
+        emailer.send_password_reset_email = lambda to, url: sent_links.append((to, url))
         self.token = login("admin@kiambu.demo", "sacco1234")
 
         code, config = api("GET", "/api/auth/config")
         self.check("Supabase Auth reports disabled without configuration",
-                   code == 200 and config.get("supabase_enabled") is False,
+                   code == 200 and config.get("supabase_enabled") is False
+                   and config.get("email_recovery_enabled") is True,
                    str((code, config)))
         code, _ = api("POST", "/api/auth/signup", {
             "email": "test@example.com", "password": "password123",
@@ -130,13 +139,14 @@ class Suite:
         })
         self.check("signup is unavailable when Supabase Auth is off",
                    code == 503, str(code))
-        code, _ = api("POST", "/api/auth/recover", {"email": "admin@kiambu.demo"})
-        self.check("password recovery is unavailable when Supabase Auth is off",
-                   code == 503, str(code))
+        code, data = api("POST", "/api/auth/recover", {"email": "nobody@example.com"})
+        self.check("unknown email does not reveal account existence",
+                   code == 200 and "reset link" in data.get("message", "")
+                   and not sent_links, str((code, data, sent_links)))
         code, _ = api("POST", "/api/auth/reset-password", {
             "access_token": "token", "password": "password123",
         })
-        self.check("password reset is unavailable when Supabase Auth is off",
+        self.check("Supabase reset still requires Supabase Auth",
                    code == 503, str(code))
 
         _, routes = api("GET", "/api/routes", token=self.token)
@@ -745,7 +755,39 @@ class Suite:
                    and summary.get("declaration_mismatches", 0) >= 1,
                    str(recon)[:200])
 
-        # --- 9. audit chain integrity (tamper test last) -------------------
+        # --- 9. local password recovery ------------------------------------
+        recovery_email = "reset-auditor@kiambu.demo"
+        code, created = api("POST", "/api/users", {
+            "email": recovery_email, "password": "oldpassword123",
+            "full_name": "Reset Auditor", "role": "AUDITOR",
+        }, token=self.token)
+        self.check("local recovery account created", code == 200, str((code, created)))
+
+        code, data = api("POST", "/api/auth/recover", {"email": recovery_email})
+        self.check("local password recovery sends a reset email",
+                   code == 200 and len(sent_links) == 1
+                   and sent_links[-1][0] == recovery_email,
+                   str((code, data, sent_links)))
+        link = sent_links[-1][1]
+        self.check("reset link uses the configured app URL",
+                   link.startswith("http://testserver/#type=recovery&token="), link)
+        token = parse_qs(urlparse(link).fragment).get("token", [""])[0]
+        self.check("reset link contains a token", bool(token), link)
+
+        code, data = api("POST", "/api/auth/reset-password", {
+            "token": token, "password": "newpassword123",
+        })
+        self.check("local password reset succeeds", code == 200, str((code, data)))
+        code, _ = api("POST", "/api/auth/reset-password", {
+            "token": token, "password": "anotherpass123",
+        })
+        self.check("reset link is single-use", code == 401, str(code))
+        code, _ = api("POST", "/api/auth/login", {
+            "email": recovery_email, "password": "newpassword123",
+        })
+        self.check("user can sign in with the new password", code == 200, str(code))
+
+        # --- 10. audit chain integrity (tamper test last) ------------------
         _, verify = api("GET", "/api/audit/verify", token=self.token)
         self.check("audit chain verifies clean", verify.get("ok") is True, str(verify))
 

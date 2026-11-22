@@ -9,6 +9,7 @@ const state = {
   stageMap: {},
   page: "overview",
   supabaseEnabled: false,
+  emailRecoveryEnabled: false,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -139,24 +140,30 @@ async function loadAuthConfig() {
   try {
     const config = await api("GET", "/api/auth/config");
     state.supabaseEnabled = Boolean(config && config.supabase_enabled);
+    state.emailRecoveryEnabled = Boolean(config && config.email_recovery_enabled);
     $("#show-signup").classList.toggle("hidden", !state.supabaseEnabled);
   } catch {
     state.supabaseEnabled = false;
+    state.emailRecoveryEnabled = false;
     $("#show-signup").classList.add("hidden");
   }
 }
 
-function recoveryTokenFromHash() {
-  const params = new URLSearchParams(location.hash.replace(/^#/, ""));
-  const query = new URLSearchParams(location.search);
-  if (params.get("type") !== "recovery" && query.get("type") !== "recovery") {
-    return null;
-  }
-  return params.get("access_token") || query.get("access_token");
+function recoveryCredentialsFromUrl() {
+  const raw = location.hash ? location.hash.slice(1) : location.search.replace(/^\?/, "");
+  const params = new URLSearchParams(raw);
+  if (params.get("type") !== "recovery") return null;
+  const accessToken = params.get("access_token");
+  const token = params.get("token");
+  if (!accessToken && !token) return null;
+  return { accessToken, token };
 }
 
-function clearRecoveryHash() {
-  history.replaceState(null, "", location.pathname + location.search);
+function clearRecoveryParams() {
+  const query = new URLSearchParams(location.search);
+  ["type", "token", "access_token"].forEach((key) => query.delete(key));
+  const search = query.toString();
+  history.replaceState(null, "", location.pathname + (search ? "?" + search : ""));
 }
 
 function showSignup() {
@@ -203,7 +210,7 @@ function showLogin() {
   $("#login-error").textContent = "";
   $("#recovery-error").textContent = "";
   $("#reset-error").textContent = "";
-  clearRecoveryHash();
+  clearRecoveryParams();
 }
 
 async function doLogin(event) {
@@ -248,8 +255,8 @@ async function doSignup(event) {
 async function doRecover(event) {
   event.preventDefault();
   $("#recovery-error").textContent = "";
-  if (!state.supabaseEnabled) {
-    $("#recovery-error").textContent = "Password recovery requires Supabase Auth. Contact your administrator.";
+  if (!state.supabaseEnabled && !state.emailRecoveryEnabled) {
+    $("#recovery-error").textContent = "Password recovery is not available. Contact your administrator.";
     return;
   }
   try {
@@ -270,17 +277,17 @@ async function doResetPassword(event) {
     $("#reset-error").textContent = "Passwords do not match";
     return;
   }
-  const accessToken = recoveryTokenFromHash();
-  if (!accessToken) {
+  const credentials = recoveryCredentialsFromUrl();
+  if (!credentials) {
     $("#reset-error").textContent = "Reset link is invalid or has expired";
     return;
   }
+  const payload = { password };
+  if (credentials.token) payload.token = credentials.token;
+  else payload.access_token = credentials.accessToken;
   try {
-    const data = await api("POST", "/api/auth/reset-password", {
-      access_token: accessToken,
-      password,
-    });
-    clearRecoveryHash();
+    const data = await api("POST", "/api/auth/reset-password", payload);
+    clearRecoveryParams();
     $("#reset-error").textContent = data.message;
   } catch (err) {
     $("#reset-error").textContent = err.message;
@@ -1445,7 +1452,7 @@ function bindEvents() {
 
 document.addEventListener("DOMContentLoaded", async () => {
   bindEvents();
-  if (recoveryTokenFromHash()) showReset();
+  if (recoveryCredentialsFromUrl()) showReset();
   $("#recon-day").value = todayInput();
   $("#tg-day-filter").value = todayInput();
   resetStageRows();
