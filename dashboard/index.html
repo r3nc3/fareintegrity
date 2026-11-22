@@ -4,7 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FareGuard — Fare Record Integrity</title>
-  <link rel="stylesheet" href="/static/style.css?v=13">
+  <link rel="stylesheet" href="/static/style.css?v=14">
+  <script>
+    (function () {
+      var saved = localStorage.getItem("fareguard_theme");
+      if (saved === "dark" || saved === "light") {
+        document.documentElement.dataset.theme = saved;
+      }
+    })();
+  </script>
 </head>
 <body>
 
@@ -87,6 +95,7 @@
           <select id="tenant-select"></select>
         </label>
         <span id="scope-badge" class="badge"></span>
+        <button id="theme-toggle" type="button" class="btn ghost small">Dark mode</button>
       </div>
     </header>
 
@@ -408,6 +417,6 @@
   </main>
 </div>
 
-<script src="/static/app.js?v=11"></script>
+<script src="/static/app.js?v=12"></script>
 </body>
 </html>

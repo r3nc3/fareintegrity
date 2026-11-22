@@ -14,6 +14,22 @@ const state = {
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
 
+const THEME_KEY = "fareguard_theme";
+
+function syncThemeToggle() {
+  const dark = document.documentElement.dataset.theme === "dark";
+  const btn = $("#theme-toggle");
+  if (!btn) return;
+  btn.textContent = dark ? "Light mode" : "Dark mode";
+  btn.setAttribute("aria-label", dark ? "Switch to light mode" : "Switch to dark mode");
+}
+
+function setTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  localStorage.setItem(THEME_KEY, theme);
+  syncThemeToggle();
+}
+
 const PAGE_META = {
   overview: ["Overview", "Live view of fare record integrity"],
   transactions: ["Transactions", "Every fare record, validated and immutable"],
@@ -1118,6 +1134,10 @@ function bindEvents() {
   $("#show-signup").addEventListener("click", showSignup);
   $("#show-login").addEventListener("click", showLogin);
   $("#logout-btn").addEventListener("click", logout);
+  $("#theme-toggle").addEventListener("click", () => {
+    setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+  });
+  syncThemeToggle();
   $$(".nav-item").forEach((btn) => {
     btn.addEventListener("click", () => navigate(btn.dataset.page));
   });
