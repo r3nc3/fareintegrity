@@ -146,18 +146,64 @@ async function loadAuthConfig() {
   }
 }
 
+function recoveryTokenFromHash() {
+  const params = new URLSearchParams(location.hash.replace(/^#/, ""));
+  const query = new URLSearchParams(location.search);
+  if (params.get("type") !== "recovery" && query.get("type") !== "recovery") {
+    return null;
+  }
+  return params.get("access_token") || query.get("access_token");
+}
+
+function clearRecoveryHash() {
+  history.replaceState(null, "", location.pathname + location.search);
+}
+
 function showSignup() {
   $("#login-form").classList.add("hidden");
+  $("#recovery-form").classList.add("hidden");
+  $("#reset-form").classList.add("hidden");
   $("#signup-form").classList.remove("hidden");
   $("#login-error").textContent = "";
   $("#signup-error").textContent = "";
+  $("#recovery-error").textContent = "";
+  $("#reset-error").textContent = "";
+}
+
+function showRecovery() {
+  $("#login-form").classList.add("hidden");
+  $("#signup-form").classList.add("hidden");
+  $("#reset-form").classList.add("hidden");
+  $("#recovery-form").classList.remove("hidden");
+  $("#login-error").textContent = "";
+  $("#signup-error").textContent = "";
+  $("#recovery-error").textContent = "";
+  $("#reset-error").textContent = "";
+  $("#recovery-email").focus();
+}
+
+function showReset() {
+  $("#login-form").classList.add("hidden");
+  $("#signup-form").classList.add("hidden");
+  $("#recovery-form").classList.add("hidden");
+  $("#reset-form").classList.remove("hidden");
+  $("#login-error").textContent = "";
+  $("#signup-error").textContent = "";
+  $("#recovery-error").textContent = "";
+  $("#reset-error").textContent = "";
+  $("#reset-password").focus();
 }
 
 function showLogin() {
   $("#signup-form").classList.add("hidden");
+  $("#recovery-form").classList.add("hidden");
+  $("#reset-form").classList.add("hidden");
   $("#login-form").classList.remove("hidden");
   $("#signup-error").textContent = "";
   $("#login-error").textContent = "";
+  $("#recovery-error").textContent = "";
+  $("#reset-error").textContent = "";
+  clearRecoveryHash();
 }
 
 async function doLogin(event) {
@@ -196,6 +242,48 @@ async function doSignup(event) {
     await applyAuth(data);
   } catch (err) {
     $("#signup-error").textContent = err.message;
+  }
+}
+
+async function doRecover(event) {
+  event.preventDefault();
+  $("#recovery-error").textContent = "";
+  if (!state.supabaseEnabled) {
+    $("#recovery-error").textContent = "Password recovery requires Supabase Auth. Contact your administrator.";
+    return;
+  }
+  try {
+    const data = await api("POST", "/api/auth/recover", {
+      email: $("#recovery-email").value.trim(),
+    });
+    $("#recovery-error").textContent = data.message;
+  } catch (err) {
+    $("#recovery-error").textContent = err.message;
+  }
+}
+
+async function doResetPassword(event) {
+  event.preventDefault();
+  $("#reset-error").textContent = "";
+  const password = $("#reset-password").value;
+  if (password !== $("#reset-confirm").value) {
+    $("#reset-error").textContent = "Passwords do not match";
+    return;
+  }
+  const accessToken = recoveryTokenFromHash();
+  if (!accessToken) {
+    $("#reset-error").textContent = "Reset link is invalid or has expired";
+    return;
+  }
+  try {
+    const data = await api("POST", "/api/auth/reset-password", {
+      access_token: accessToken,
+      password,
+    });
+    clearRecoveryHash();
+    $("#reset-error").textContent = data.message;
+  } catch (err) {
+    $("#reset-error").textContent = err.message;
   }
 }
 
@@ -1133,6 +1221,11 @@ function bindEvents() {
   $("#signup-form").addEventListener("submit", doSignup);
   $("#show-signup").addEventListener("click", showSignup);
   $("#show-login").addEventListener("click", showLogin);
+  $("#show-recovery").addEventListener("click", showRecovery);
+  $("#recovery-form").addEventListener("submit", doRecover);
+  $("#recovery-back").addEventListener("click", showLogin);
+  $("#reset-form").addEventListener("submit", doResetPassword);
+  $("#reset-back").addEventListener("click", showLogin);
   $("#logout-btn").addEventListener("click", logout);
   $("#theme-toggle").addEventListener("click", () => {
     setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
@@ -1352,6 +1445,7 @@ function bindEvents() {
 
 document.addEventListener("DOMContentLoaded", async () => {
   bindEvents();
+  if (recoveryTokenFromHash()) showReset();
   $("#recon-day").value = todayInput();
   $("#tg-day-filter").value = todayInput();
   resetStageRows();

@@ -90,6 +90,15 @@ def sign_in(email: str, password: str) -> dict:
     })
 
 
+def recover(email: str) -> dict:
+    return _request("POST", "/auth/v1/recover", {"email": email})
+
+
+def update_password(access_token: str, password: str) -> dict:
+    return _request("PUT", "/auth/v1/user", {"password": password},
+                    access_token=access_token)
+
+
 def get_user(access_token: str) -> dict:
     return _request("GET", "/auth/v1/user", access_token=access_token)
 

@@ -108,6 +108,15 @@ auto-linked to a Supabase identity, so they cannot be taken over by a matching
 email; they continue to work with their existing password. Supabase Auth only
 takes over an account once it is linked by `supabase_user_id`.
 
+### Password recovery
+
+When Supabase Auth is configured, **Forgot password?** on the sign-in page
+sends a Supabase recovery email. Set the Supabase **Site URL** to the dashboard
+URL so the link returns to FareGuard; the dashboard detects the recovery token
+in the URL, asks for a new password, and updates it through Supabase Auth.
+Local accounts have no email delivery, so an administrator must change their
+password from **Manage → Users**.
+
 Example Vercel values:
 
 ```text
@@ -163,6 +172,8 @@ is ephemeral, so that mode is only suitable for local development and tests.
 - `GET /api/auth/config` — whether Supabase email signup is enabled
 - `POST /api/auth/signup` — Supabase email signup (creates a SACCO tenant and admin)
 - `POST /api/auth/login` — Supabase Auth when configured, local PBKDF2 fallback otherwise; returns a signed FareGuard JWT
+- `POST /api/auth/recover` — send a Supabase password-reset email
+- `POST /api/auth/reset-password` — set a new password using a recovery access token
 - `POST /api/transactions` (conductors record their own; admins any trip), `GET /api/transactions` (conductors see only their own), `GET /api/transactions/{id}`, `POST /api/transactions/{id}/reverse`
 - `GET /api/targets`, `POST /api/targets` — standing daily target per vehicle (admin sets/changes it)
 - `POST /api/daily-collections`, `POST /api/targets/{id}/declare`, `POST /api/targets/{id}/handover` — daily collections, conductor declarations and admin-logged handovers

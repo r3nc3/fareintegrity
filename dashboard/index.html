@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FareGuard — Fare Record Integrity</title>
-  <link rel="stylesheet" href="/static/style.css?v=14">
+  <link rel="stylesheet" href="/static/style.css?v=15">
   <script>
     (function () {
       var saved = localStorage.getItem("fareguard_theme");
@@ -28,10 +28,38 @@
       <input id="login-password" type="password" placeholder="Password" required>
     </label>
     <button type="submit" class="btn primary">Sign in</button>
+    <button id="show-recovery" type="button" class="link-btn">Forgot password?</button>
     <button id="show-signup" type="button" class="btn ghost small hidden">
       Create a SACCO account
     </button>
     <p id="login-error" class="error"></p>
+  </form>
+
+  <form id="recovery-form" class="login-card hidden" autocomplete="on">
+    <div class="brand-mark">FG</div>
+    <h1>Reset password</h1>
+    <p class="sub">Enter your email and we'll send you a reset link.</p>
+    <label>Email
+      <input id="recovery-email" type="email" placeholder="you@example.com" required>
+    </label>
+    <button type="submit" class="btn primary">Send reset link</button>
+    <button id="recovery-back" type="button" class="btn ghost small">Back to sign in</button>
+    <p id="recovery-error" class="error"></p>
+  </form>
+
+  <form id="reset-form" class="login-card hidden" autocomplete="new-password">
+    <div class="brand-mark">FG</div>
+    <h1>Choose a new password</h1>
+    <p class="sub">Set a new password for your FareGuard account.</p>
+    <label>New password
+      <input id="reset-password" type="password" placeholder="At least 8 characters" minlength="8" required>
+    </label>
+    <label>Confirm password
+      <input id="reset-confirm" type="password" placeholder="Repeat password" minlength="8" required>
+    </label>
+    <button type="submit" class="btn primary">Update password</button>
+    <button id="reset-back" type="button" class="btn ghost small">Back to sign in</button>
+    <p id="reset-error" class="error"></p>
   </form>
 
   <form id="signup-form" class="login-card hidden" autocomplete="on">
@@ -417,6 +445,6 @@
   </main>
 </div>
 
-<script src="/static/app.js?v=12"></script>
+<script src="/static/app.js?v=13"></script>
 </body>
 </html>

@@ -130,6 +130,14 @@ class Suite:
         })
         self.check("signup is unavailable when Supabase Auth is off",
                    code == 503, str(code))
+        code, _ = api("POST", "/api/auth/recover", {"email": "admin@kiambu.demo"})
+        self.check("password recovery is unavailable when Supabase Auth is off",
+                   code == 503, str(code))
+        code, _ = api("POST", "/api/auth/reset-password", {
+            "access_token": "token", "password": "password123",
+        })
+        self.check("password reset is unavailable when Supabase Auth is off",
+                   code == 503, str(code))
 
         _, routes = api("GET", "/api/routes", token=self.token)
         self.stage = {s["name"]: s for r in routes for s in r["stages"]}

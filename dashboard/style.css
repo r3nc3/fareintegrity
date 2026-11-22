@@ -217,6 +217,12 @@ label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color:
 .btn.small { padding: 6px 10px; font-size: 12px; }
 .btn.danger { background: rgba(192, 57, 43, .10); color: var(--text-strong); border-color: rgba(192,57,43,.30); }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
+.link-btn {
+  align-self: flex-start;
+  background: none; border: 0; padding: 0;
+  color: var(--accent); font-family: inherit; font-size: 12px;
+  cursor: pointer; text-decoration: underline;
+}
 
 /* ---------- tables ---------- */
 .table-wrap { overflow-x: auto; }

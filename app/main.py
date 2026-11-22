@@ -256,6 +256,15 @@ class SignupBody(BaseModel):
     sacco_name: str = Field(..., min_length=2, max_length=200)
 
 
+class RecoverBody(BaseModel):
+    email: str = Field(..., max_length=150)
+
+
+class ResetPasswordBody(BaseModel):
+    access_token: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=8, max_length=200)
+
+
 def _normalise_email(email: str) -> str:
     value = email.strip().lower()
     if not _EMAIL_RE.fullmatch(value):
@@ -428,6 +437,32 @@ def login(body: LoginBody, db: Session = Depends(get_db)):
                     raise _supabase_error(error)
             raise _supabase_error(error)
     return _local_login(db, email, body.password)
+
+
+@app.post("/api/auth/recover")
+def recover_password(body: RecoverBody):
+    if not supabase_auth.is_configured():
+        raise HTTPException(503, "Supabase Auth is not configured")
+    email = _normalise_email(body.email)
+    try:
+        supabase_auth.recover(email)
+    except SupabaseAuthError as error:
+        raise _supabase_error(error)
+    return {"message": "If that email has an account, a reset link has been sent."}
+
+
+@app.post("/api/auth/reset-password")
+def reset_password(body: ResetPasswordBody):
+    if not supabase_auth.is_configured():
+        raise HTTPException(503, "Supabase Auth is not configured")
+    try:
+        supabase_auth.update_password(body.access_token, body.password)
+    except SupabaseAuthError as error:
+        message = error.message.lower()
+        if "expired" in message or "invalid" in message or "jwt" in message:
+            raise HTTPException(401, "Reset link is invalid or has expired")
+        raise _supabase_error(error)
+    return {"message": "Password updated. You can sign in now."}
 
 
 @app.get("/api/me")
