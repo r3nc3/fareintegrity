@@ -87,10 +87,12 @@ export FAREGUARD_SECRET='replace-with-a-long-random-secret'
 
 1. In Supabase, open **Authentication → Providers → Email** and enable email
    signups. Email confirmation can be enabled or disabled; both flows work.
-2. In **Project Settings → API**, copy the **Project URL** and the anon /
-   publishable key. Do not use the service-role key.
-3. Set them as `SUPABASE_URL` and `SUPABASE_ANON_KEY` (`SUPABASE_PUBLISHABLE_KEY`
-   is accepted as an alias for the key).
+2. In **Project Settings → API**, copy the **Project URL**, the anon /
+   publishable key, and (for migrating local users) the new secret key. The
+   secret key is server-only.
+3. Set them as `SUPABASE_URL`, `SUPABASE_ANON_KEY` and `SUPABASE_SECRET_KEY`
+   (`SUPABASE_PUBLISHABLE_KEY` and `SUPABASE_SERVICE_ROLE_KEY` are accepted as
+   aliases for the anon and secret keys).
 4. Set `FAREGUARD_SECRET` as above; Supabase tokens are exchanged for signed
    FareGuard session tokens after verification.
 5. Redeploy Vercel after adding the variables.
@@ -112,18 +114,19 @@ takes over an account once it is linked by `supabase_user_id`.
 
 **Forgot password?** works for every account with an email address.
 
-- Supabase identities (SACCO admins created by signup) get a Supabase recovery
-  email. Set the Supabase **Site URL** to the dashboard URL so the reset link
-  returns to FareGuard.
-- Local accounts (conductors, auditors and demo users) get an email from
-  FareGuard with a single-use link that expires after 30 minutes. Configure an
-  SMTP relay with `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`,
-  `SMTP_FROM` and `SMTP_TLS` (`starttls`, `ssl` or `none`), and set `APP_URL` to
-  the dashboard URL so the link points at the right host.
+- Supabase identities (SACCO admins, and conductors/auditors migrated to
+  Supabase) get a Supabase recovery email. In Supabase, set **Authentication →
+  URL Configuration → Site URL** to the dashboard URL, and configure an SMTP
+  provider under **Authentication → Emails → SMTP**.
+- Local accounts still get a FareGuard email with a single-use link that
+  expires after 30 minutes. Configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`,
+  `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_TLS` and `APP_URL` until they are migrated.
 
-The dashboard detects the recovery token in the link, asks for a new password,
-and updates it. If neither Supabase Auth nor SMTP is configured, the page tells
-the user to contact their administrator instead.
+To migrate local users, add `SUPABASE_SECRET_KEY` (server-only) and use
+**Manage → Users → Move to Supabase**. FareGuard creates the Supabase account,
+links it by `supabase_user_id`, and sends a setup email. New conductors and
+auditors are provisioned in Supabase automatically when the secret key is set.
+The button changes to **Resend setup email** for linked accounts.
 
 Example Vercel values:
 
@@ -132,6 +135,7 @@ DATABASE_URL=postgresql://postgres.<project-ref>:<url-encoded-password>@aws-0-<r
 FAREGUARD_SECRET=<long-random-secret>
 SUPABASE_URL=https://<project-ref>.supabase.co
 SUPABASE_ANON_KEY=<anon-or-publishable-key>
+SUPABASE_SECRET_KEY=<secret-key-server-only>
 APP_URL=https://your-dashboard-domain.example
 SMTP_HOST=smtp.example.com
 SMTP_PORT=587
@@ -147,7 +151,9 @@ Never commit the real connection string, keys or secret to Git.
 
 Import this repository into Vercel. The Python function entrypoint is
 `api/index.py` (Mangum wraps the FastAPI app). Set `DATABASE_URL`,
-`FAREGUARD_SECRET`, `SUPABASE_URL` and `SUPABASE_ANON_KEY` as described above.
+`FAREGUARD_SECRET`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`,
+`SUPABASE_SECRET_KEY` (for user migration), `APP_URL` and your mail settings as
+described above.
 
 Without `DATABASE_URL` the code still uses local SQLite, but Vercel's filesystem
 is ephemeral, so that mode is only suitable for local development and tests.
@@ -184,7 +190,7 @@ is ephemeral, so that mode is only suitable for local development and tests.
 
 ## Key API surface
 
-- `GET /api/auth/config` — whether Supabase email signup is enabled
+- `GET /api/auth/config` — whether Supabase signup, Supabase admin migration and email recovery are enabled
 - `POST /api/auth/signup` — Supabase email signup (creates a SACCO tenant and admin)
 - `POST /api/auth/login` — Supabase Auth when configured, local PBKDF2 fallback otherwise; returns a signed FareGuard JWT
 - `POST /api/auth/recover` — send a Supabase recovery email or an SMTP reset link for local accounts
@@ -211,6 +217,8 @@ the dashboard. Shifts can only be closed by admins.
   change role, reset password, enable/disable. SACCO admins may only create and
   manage conductors and auditors in their own SACCO; platform operators may
   create any role and assign it to a SACCO.
+- `POST /api/users/{id}/migrate-supabase` — create/link a Supabase identity and
+  send a setup email; resends the setup email for already-linked users.
 - `GET /api/vehicles`, `POST /api/vehicles`, `PATCH /api/vehicles/{id}` — add or
   edit fleet vehicles, capacity and device/POS IDs. Registration and device ID
   are unique per SACCO.

@@ -2,6 +2,7 @@ import csv
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import secrets
@@ -56,6 +57,7 @@ from .supabase_auth import SupabaseAuthError
 
 ROOT = Path(__file__).resolve().parent.parent
 DASHBOARD_DIR = ROOT / "dashboard"
+logger = logging.getLogger(__name__)
 
 
 def _ensure_target_schema():
@@ -125,6 +127,11 @@ def initialize_database():
 @asynccontextmanager
 async def lifespan(app):
     initialize_database()
+    if not emailer.is_configured():
+        logger.warning(
+            "SMTP is not configured; local password recovery emails will not be sent. "
+            "Set SMTP_HOST, SMTP_FROM and APP_URL to enable them."
+        )
     yield
 
 
@@ -300,6 +307,27 @@ def _app_url(request: Request) -> str:
     return configured or str(request.base_url).rstrip("/")
 
 
+def _supabase_admin_ready() -> bool:
+    return supabase_auth.is_configured() and supabase_auth.is_admin_configured()
+
+
+def _provision_supabase_user(db: Session, user: User) -> bool:
+    if not _supabase_admin_ready():
+        return False
+    remote = supabase_auth.admin_create_user(
+        user.email,
+        secrets.token_urlsafe(32),
+        {"full_name": user.full_name, "fareguard_role": user.role},
+        {"fareguard_user_id": str(user.id), "fareguard_role": user.role},
+    )
+    remote_user = supabase_auth.admin_user(remote)
+    remote_id = str(remote_user.get("id") or "").strip()
+    if not remote_id:
+        raise HTTPException(502, "Supabase Auth returned an invalid user")
+    user.supabase_user_id = remote_id
+    return True
+
+
 def _sync_supabase_user(db: Session, remote: dict, action: str) -> User:
     remote_id = str(remote.get("id") or "").strip()
     email = _normalise_email(str(remote.get("email") or ""))
@@ -307,8 +335,15 @@ def _sync_supabase_user(db: Session, remote: dict, action: str) -> User:
         raise HTTPException(502, "Supabase Auth returned an invalid user")
 
     metadata = remote.get("user_metadata") or {}
+    app_metadata = remote.get("app_metadata") or {}
+    linked_id = str(app_metadata.get("fareguard_user_id") or "").strip()
     user = db.query(User).filter(User.supabase_user_id == remote_id).first()
     created = False
+
+    if user is None and linked_id.isdigit():
+        user = db.get(User, int(linked_id))
+        if user is not None and user.email != email:
+            raise HTTPException(409, "That email is already in use")
 
     if user is None:
         user = db.query(User).filter(User.email == email).first()
@@ -348,11 +383,17 @@ def _sync_supabase_user(db: Session, remote: dict, action: str) -> User:
         user.email = email
     if not user.active:
         raise HTTPException(403, "Account disabled")
+    linked_now = user.supabase_user_id != remote_id
+    if linked_now:
+        user.supabase_user_id = remote_id
 
     log_audit(
         db, tenant_id=user.tenant_id, actor_id=user.id, actor_email=user.email,
         action=action, entity="user", entity_id=user.id,
-        summary="Supabase account linked" if created else "Supabase sign-in success",
+        summary=(
+            "Supabase account linked"
+            if created or linked_now else "Supabase sign-in success"
+        ),
     )
     db.commit()
     return user
@@ -391,6 +432,7 @@ def _local_login(db: Session, email: str, password: str) -> dict:
 def auth_config():
     return {
         "supabase_enabled": supabase_auth.is_configured(),
+        "supabase_admin_enabled": _supabase_admin_ready(),
         "email_recovery_enabled": emailer.is_configured(),
     }
 
@@ -457,12 +499,22 @@ def recover_password(body: RecoverBody, request: Request,
                      db: Session = Depends(get_db)):
     email = _normalise_email(body.email)
     user = db.query(User).filter(User.email == email).first()
-    if user is not None and user.supabase_user_id and supabase_auth.is_configured():
+    supabase_ready = supabase_auth.is_configured()
+    smtp_ready = emailer.is_configured()
+    if user is not None and not user.active:
+        user = None
+    if user is not None and user.supabase_user_id and supabase_ready:
         try:
             supabase_auth.recover(email)
         except SupabaseAuthError as error:
             raise _supabase_error(error)
-    elif user is not None and user.active and emailer.is_configured():
+    elif user is not None:
+        if not smtp_ready:
+            raise HTTPException(
+                503,
+                "Password recovery is not configured for local accounts. "
+                "Contact your administrator.",
+            )
         token = secrets.token_urlsafe(32)
         db.query(PasswordReset).filter(
             PasswordReset.user_id == user.id,
@@ -485,6 +537,8 @@ def recover_password(body: RecoverBody, request: Request,
             summary="Password reset link issued",
         )
         db.commit()
+    elif not supabase_ready and not smtp_ready:
+        raise HTTPException(503, "Password recovery is not configured. Contact your administrator.")
     return {"message": "If that email has an account, a reset link has been sent."}
 
 
@@ -597,6 +651,7 @@ def _user_json(u: User, tenant_name: str | None = None) -> dict:
         "id": u.id, "tenant_id": u.tenant_id, "email": u.email,
         "full_name": u.full_name, "role": u.role, "active": u.active,
         "tenant_name": tenant_name,
+        "supabase_linked": bool(u.supabase_user_id),
         "created_at": u.created_at.isoformat() if u.created_at else None,
     }
 
@@ -747,12 +802,69 @@ def create_user(body: UserCreate, db: Session = Depends(get_db),
                     full_name=body.full_name.strip(), role=role)
     db.add(new_user)
     db.flush()
+    supabase_setup = False
+    setup_email_failed = False
+    if role != ROLE_PLATFORM and _supabase_admin_ready():
+        try:
+            supabase_setup = _provision_supabase_user(db, new_user)
+            if supabase_setup:
+                try:
+                    supabase_auth.recover(email)
+                except SupabaseAuthError:
+                    setup_email_failed = True
+        except SupabaseAuthError as error:
+            raise _supabase_error(error)
+    summary = f"{role} created: {email}"
+    if supabase_setup and not setup_email_failed:
+        summary += "; Supabase setup email sent"
+    if setup_email_failed:
+        summary += "; Supabase setup email failed"
     log_audit(db, tenant_id=tenant_id, actor_id=user.id, actor_email=user.email,
               action="USER_CREATED", entity="user", entity_id=new_user.id,
-              summary=f"{role} created: {email}")
+              summary=summary)
     db.commit()
     tenant = db.get(Tenant, tenant_id) if tenant_id else None
     return _user_json(new_user, tenant.name if tenant else None)
+
+
+@app.post("/api/users/{user_id}/migrate-supabase")
+def migrate_user_supabase(user_id: int, db: Session = Depends(get_db),
+                          actor: User = Depends(require_roles(*MANAGE_ROLES))):
+    target = _target_user(db, actor, user_id)
+    if target.role == ROLE_PLATFORM:
+        raise HTTPException(422, "Platform accounts cannot be migrated")
+    if not target.active:
+        raise HTTPException(422, "Enable the account before migrating it")
+    if not _supabase_admin_ready():
+        raise HTTPException(503, "Supabase admin API is not configured")
+
+    try:
+        if target.supabase_user_id:
+            supabase_auth.recover(target.email)
+            message = "Supabase setup email resent"
+            summary = "Supabase setup email resent"
+        else:
+            _provision_supabase_user(db, target)
+            summary = "Local account migrated to Supabase"
+            try:
+                supabase_auth.recover(target.email)
+                message = "Supabase account created; setup email sent"
+            except SupabaseAuthError:
+                message = "Supabase account linked; use Resend setup email"
+                summary += " (setup email failed)"
+    except SupabaseAuthError as error:
+        raise _supabase_error(error)
+
+    log_audit(
+        db, tenant_id=target.tenant_id, actor_id=actor.id,
+        actor_email=actor.email, action="SUPABASE_MIGRATION",
+        entity="user", entity_id=target.id, summary=summary,
+    )
+    db.commit()
+    tenant = db.get(Tenant, target.tenant_id) if target.tenant_id else None
+    result = _user_json(target, tenant.name if tenant else None)
+    result["message"] = message
+    return result
 
 
 @app.patch("/api/users/{user_id}")

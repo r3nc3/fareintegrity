@@ -27,6 +27,21 @@ def is_configured() -> bool:
     return bool(url and key)
 
 
+def _admin_settings() -> tuple[str, str]:
+    url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+    key = (
+        os.environ.get("SUPABASE_SECRET_KEY")
+        or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        or ""
+    ).strip()
+    return url, key
+
+
+def is_admin_configured() -> bool:
+    url, key = _admin_settings()
+    return bool(url and key)
+
+
 def _base_url(url: str) -> str:
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
@@ -75,6 +90,57 @@ def _request(method: str, path: str, body: dict | None = None,
         raise SupabaseAuthError("Supabase Auth returned invalid JSON", 502) from exc
 
 
+def _admin_request(method: str, path: str, body: dict | None = None) -> dict:
+    url, key = _admin_settings()
+    if not url or not key:
+        raise SupabaseAuthError("Supabase admin API is not configured", 503)
+    request = urllib.request.Request(
+        _base_url(url) + path,
+        data=json.dumps(body).encode() if body is not None else None,
+        method=method,
+        headers={
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=12) as response:
+            raw = response.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", "replace")
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            payload = {}
+        message = (
+            payload.get("msg")
+            or payload.get("message")
+            or payload.get("error_description")
+            or exc.reason
+            or "Supabase admin request failed"
+        )
+        status = exc.code if exc.code in (400, 401, 409, 422) else 502
+        raise SupabaseAuthError(str(message), status) from exc
+    except urllib.error.URLError as exc:
+        raise SupabaseAuthError("Could not reach Supabase Auth", 502) from exc
+    except json.JSONDecodeError as exc:
+        raise SupabaseAuthError("Supabase Auth returned invalid JSON", 502) from exc
+
+
+def admin_create_user(email: str, password: str, user_metadata: dict,
+                      app_metadata: dict) -> dict:
+    return _admin_request("POST", "/auth/v1/admin/users", {
+        "email": email,
+        "password": password,
+        "email_confirm": True,
+        "user_metadata": user_metadata,
+        "app_metadata": app_metadata,
+    })
+
+
 def sign_up(email: str, password: str, metadata: dict) -> dict:
     return _request("POST", "/auth/v1/signup", {
         "email": email,
@@ -111,3 +177,7 @@ def access_token(payload: dict) -> str | None:
 def auth_user(payload: dict) -> dict:
     session = payload.get("session") or {}
     return payload.get("user") or session.get("user") or {}
+
+
+def admin_user(payload: dict) -> dict:
+    return payload.get("user") or payload

@@ -9,6 +9,7 @@ const state = {
   stageMap: {},
   page: "overview",
   supabaseEnabled: false,
+  supabaseAdminEnabled: false,
   emailRecoveryEnabled: false,
 };
 
@@ -140,10 +141,12 @@ async function loadAuthConfig() {
   try {
     const config = await api("GET", "/api/auth/config");
     state.supabaseEnabled = Boolean(config && config.supabase_enabled);
+    state.supabaseAdminEnabled = Boolean(config && config.supabase_admin_enabled);
     state.emailRecoveryEnabled = Boolean(config && config.email_recovery_enabled);
     $("#show-signup").classList.toggle("hidden", !state.supabaseEnabled);
   } catch {
     state.supabaseEnabled = false;
+    state.supabaseAdminEnabled = false;
     state.emailRecoveryEnabled = false;
     $("#show-signup").classList.add("hidden");
   }
@@ -988,13 +991,19 @@ function renderUserTable(users) {
     return;
   }
   const head = `<thead><tr>
-    <th>Name</th><th>Email</th><th>Role</th><th>SACCO</th><th>Status</th><th>Actions</th>
+    <th>Name</th><th>Email</th><th>Role</th><th>SACCO</th><th>Auth</th><th>Status</th><th>Actions</th>
   </tr></thead>`;
   const body = users.map((u) => {
     const self = u.id === state.user.id;
     const status = u.active
       ? `<span class="pill OK">ACTIVE</span>`
       : `<span class="pill DISMISSED">DISABLED</span>`;
+    const auth = u.supabase_linked
+      ? `<span class="pill OK">SUPABASE</span>` : `<span class="pill">LOCAL</span>`;
+    const migrate = state.supabaseAdminEnabled && u.role !== "PLATFORM_ADMIN"
+      ? `<button class="btn ghost small" data-user-migrate="${u.id}">${
+          u.supabase_linked ? "Resend setup email" : "Move to Supabase"}</button>`
+      : "";
     const toggle = self ? "" : `
       <button class="btn ghost small" data-user-toggle="${u.id}"
         data-active="${u.active ? "false" : "true"}">${u.active ? "Disable" : "Enable"}</button>`;
@@ -1003,9 +1012,11 @@ function renderUserTable(users) {
       <td class="mono">${esc(u.email)}</td>
       <td>${esc(u.role.replace("_", " "))}</td>
       <td>${esc(u.tenant_name || "—")}</td>
+      <td>${auth}</td>
       <td>${status}</td>
       <td>
         <button class="btn ghost small" data-user-reset="${u.id}">Reset password</button>
+        ${migrate}
         ${toggle}
       </td>
     </tr>`;
@@ -1305,6 +1316,18 @@ function bindEvents() {
       try {
         await api("PATCH", `/api/users/${userReset.dataset.userReset}`, { password });
         toast("Password updated");
+      } catch (err) {
+        toast(err.message, true);
+      }
+      return;
+    }
+
+    const userMigrate = event.target.closest("[data-user-migrate]");
+    if (userMigrate) {
+      try {
+        const data = await api("POST", `/api/users/${userMigrate.dataset.userMigrate}/migrate-supabase`);
+        toast(data.message || "Supabase setup email sent");
+        await renderAdmin();
       } catch (err) {
         toast(err.message, true);
       }

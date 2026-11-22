@@ -11,6 +11,7 @@ Exercises the real HTTP API and asserts:
    8. the platform is NOT a payment processor (no payment endpoints)
     9. Supabase Auth stays disabled when its environment is not configured
    10. local accounts can reset their password through an emailed link
+   11. local accounts can be migrated to Supabase Auth
 
 
 Usage:  .venv/bin/python tests/e2e.py
@@ -35,6 +36,8 @@ os.environ.pop("SUPABASE_DATABASE_URL", None)
 os.environ.pop("SUPABASE_URL", None)
 os.environ.pop("SUPABASE_ANON_KEY", None)
 os.environ.pop("SUPABASE_PUBLISHABLE_KEY", None)
+os.environ.pop("SUPABASE_SECRET_KEY", None)
+os.environ.pop("SUPABASE_SERVICE_ROLE_KEY", None)
 os.environ["APP_URL"] = "http://testserver"
 os.environ["SMTP_HOST"] = "localhost"
 sys.path.insert(0, str(ROOT))
@@ -131,8 +134,18 @@ class Suite:
         code, config = api("GET", "/api/auth/config")
         self.check("Supabase Auth reports disabled without configuration",
                    code == 200 and config.get("supabase_enabled") is False
+                   and config.get("supabase_admin_enabled") is False
                    and config.get("email_recovery_enabled") is True,
                    str((code, config)))
+        smtp_host = os.environ.pop("SMTP_HOST")
+        try:
+            code, data = api("POST", "/api/auth/recover",
+                             {"email": "admin@kiambu.demo"})
+            self.check("missing SMTP is reported instead of silently skipping email",
+                       code == 503 and "not configured" in str(data),
+                       str((code, data)))
+        finally:
+            os.environ["SMTP_HOST"] = smtp_host
         code, _ = api("POST", "/api/auth/signup", {
             "email": "test@example.com", "password": "password123",
             "full_name": "Test User", "sacco_name": "Test SACCO",
@@ -787,7 +800,68 @@ class Suite:
         })
         self.check("user can sign in with the new password", code == 200, str(code))
 
-        # --- 10. audit chain integrity (tamper test last) ------------------
+        # --- 10. Supabase migration ----------------------------------------
+        migration_email = "migrate-conductor@kiambu.demo"
+        code, created = api("POST", "/api/users", {
+            "email": migration_email, "password": "oldpassword123",
+            "full_name": "Migrating Conductor", "role": "CONDUCTOR",
+        }, token=self.token)
+        self.check("migration test user created", code == 200, str((code, created)))
+        user_id = created["id"]
+
+        env_names = ("SUPABASE_URL", "SUPABASE_ANON_KEY",
+                     "SUPABASE_SECRET_KEY", "SUPABASE_SERVICE_ROLE_KEY")
+        saved_env = {name: os.environ.get(name) for name in env_names}
+        os.environ["SUPABASE_URL"] = "https://example.supabase.co"
+        os.environ["SUPABASE_ANON_KEY"] = "anon-test"
+        os.environ["SUPABASE_SECRET_KEY"] = "secret-test"
+        import app.supabase_auth as supabase_auth
+        original_create = supabase_auth.admin_create_user
+        original_recover = supabase_auth.recover
+        created_users = []
+        recovered = []
+
+        def fake_create(email, password, user_metadata, app_metadata):
+            created_users.append((email, app_metadata))
+            return {"id": "supabase-test-id", "email": email,
+                    "user_metadata": user_metadata, "app_metadata": app_metadata}
+
+        def fake_recover(email):
+            recovered.append(email)
+            return {}
+
+        supabase_auth.admin_create_user = fake_create
+        supabase_auth.recover = fake_recover
+        try:
+            code, data = api(
+                "POST", f"/api/users/{user_id}/migrate-supabase", token=self.token)
+            self.check("local user migrated to Supabase",
+                       code == 200 and len(created_users) == 1
+                       and created_users[0][1].get("fareguard_user_id") == str(user_id),
+                       str((code, data, created_users)))
+            self.check("migration sends a Supabase setup email",
+                       recovered == [migration_email], str(recovered))
+            code, users = api("GET", "/api/users", token=self.token)
+            migrated = next((u for u in users if u["id"] == user_id), None)
+            self.check("user shows as Supabase-linked",
+                       bool(migrated and migrated.get("supabase_linked")),
+                       str(migrated))
+            code, data = api(
+                "POST", f"/api/users/{user_id}/migrate-supabase", token=self.token)
+            self.check("already-linked user can resend setup email",
+                       code == 200 and recovered[-1:] == [migration_email]
+                       and len(created_users) == 1,
+                       str((code, data, created_users, recovered)))
+        finally:
+            supabase_auth.admin_create_user = original_create
+            supabase_auth.recover = original_recover
+            for name, value in saved_env.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+        # --- 11. audit chain integrity (tamper test last) ------------------
         _, verify = api("GET", "/api/audit/verify", token=self.token)
         self.check("audit chain verifies clean", verify.get("ok") is True, str(verify))
 
